@@ -1,11 +1,8 @@
 import os
 import sys
-import csv
 import time
 import datetime
 import threading
-import platform
-import subprocess
 
 import tkinter as tk
 from tkinter import filedialog
@@ -15,8 +12,13 @@ import asyncio
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
+
+#===============================================================================
+# UTILS
+#===============================================================================
+
 def get_application_path():
-    if getattr(sys, 'frozen', False):  # if running as bundled executable
+    if getattr(sys, "frozen", False):  # if running as bundled executable
         # if ran using macos application
         path_components = sys.executable.split(os.sep)
         if "axs-webscraper.app" in path_components:
@@ -29,38 +31,22 @@ def get_application_path():
     else:
         return os.path.dirname(__file__)
 
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(get_application_path(), "browser_drivers")
+
+if not os.environ["PLAYWRIGHT_BROWSERS_PATH"]:
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(
+        get_application_path(), "browser_drivers"
+    )
 print(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
 
-class AxsWebscraper:
-    def __init__(self, start_id, stop_id, concurrent_windows, outfile=""):
-        self.start_id = start_id
-        self.stop_id = stop_id
-        if outfile == "":
-            current_datetime = datetime.datetime.now()
-            formatted_datetime = current_datetime.strftime("%Y-%m-%d_%H-%M-%S")
-            # self.outfile = f"{get_application_path()}/output/{formatted_datetime}_{self.start_id}-{self.stop_id}.csv"
-            self.outfile = os.path.join(get_application_path(), "output", f"{formatted_datetime}_{self.start_id}-{self.stop_id}.csv")
-        else:
-            self.outfile = outfile
-        self.semaphore = asyncio.Semaphore(int(concurrent_windows))
 
-        self.ids = list(range(start_id, stop_id + 1))
-        self.urls = [self._id_to_url(id) for id in self.ids]
+#===============================================================================
+# IMPLEMENTATION CLASSES
+#===============================================================================
+
+class Webscraper:
+    def __init__(self, n_concurrent_windows):
+        self.semaphore = asyncio.Semaphore(int(n_concurrent_windows))
         self.failed_connections = []
-
-        self.is_running = False
-
-    def _id_to_url(self, id):
-        """Get the URL for given axs event ID
-
-        Args:
-            id (int): event ID of an axs event
-
-        Returns:
-            str: URL of event
-        """
-        return f"https://www.axs.com/series/{id}/"
 
     async def _start_browser(self):
         playwright = await async_playwright().start()
@@ -82,28 +68,30 @@ class AxsWebscraper:
             dict{str: str}: Mapping of url to raw html
         """
         async with self.semaphore:
-            print(f"sending request to {url}")
             user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36"
             context = await browser.new_context(user_agent=user_agent)
             page = await context.new_page()
             try:
+                print(f"sending request to {url}")
                 await page.goto(url)
+
             except Exception as err:
-                print(f"error for {url}")
+                print(f"error for {url}:")
                 print(err)
                 self.failed_connections.append(url)
                 await page.close()
                 return {url: ""}
+
+            print(f"received response from {url}")
+
             if url in self.failed_connections:
                 self.failed_connections.remove(url)
             html = await page.content()
-            # await page.pause()
             await context.close()
-            print(f"received response from {url}")
 
         return {url: html}
 
-    async def _get_htmls(self):
+    async def get_htmls(self, urls):
         """Get html for urls
 
         Returns:
@@ -112,9 +100,13 @@ class AxsWebscraper:
 
         browser, playwright = await self._start_browser()
 
+        coros = [self._get_html(url, browser) for url in urls]
+
         # get html of each url
-        coros = [self._get_html(url, browser) for url in self.urls]
-        urls_to_raw_htmls = await asyncio.gather(*coros) # the result is in the same order as the passed-in list of coros
+        #   - note that the result is in the same order as the passed-in list of coros
+        urls_to_raw_htmls = await asyncio.gather(
+            *coros
+        )
 
         # retry failed connections up to 10 times
         for _ in range(10):
@@ -127,50 +119,87 @@ class AxsWebscraper:
         await self._close_browser(playwright, browser)
 
         # return {url: BeautifulSoup(html, 'html.parser') for url_to_raw_html in urls_to_raw_htmls for url, html in url_to_raw_html.items()}
-        return {url: html for url_to_raw_html in urls_to_raw_htmls for url, html in url_to_raw_html.items()}
+        return {
+            url: html
+            for url_to_raw_html in urls_to_raw_htmls
+            for url, html in url_to_raw_html.items()
+        }
 
-    def _get_titles(self):
+class AxsSeriesWebscraper(Webscraper):
+
+    @classmethod
+    def _get_titles(cls, urls_to_htmls: dict[str, str]):
         """Parse the html for the title of the series
 
         Returns:
             dict{str: str|None}: Mapping of urls to their AXS event titles
         """
         titles = {}
-        urls_to_htmls = asyncio.run(self._get_htmls())
 
         print("Parsing responses...")
         for url, html in urls_to_htmls.items():
-            html = BeautifulSoup(html, 'html.parser')
-            title = html.find('h1', class_='series-header__main-title') or html.find('div', class_='styles__SeriesName-sc-a987fbc9-2') or html.find('div', class_='styles__SeriesName-sc-7ec0aa62-2') or html.find('h1', class_='styles__SeriesTitle-sc-22d8e9ab-1') or html.find('h1', class_='styles__SeriesTitle-sc-3de48f0c-1') or html.find('h1', class_='styles__SeriesTitle-sc-65abd048-1')
+            html = BeautifulSoup(html, "html.parser")
+            title = (
+                html.find("h1", class_="series-header__main-title")
+                or html.find("div", class_="styles__SeriesName-sc-a987fbc9-2")
+                or html.find("div", class_="styles__SeriesName-sc-7ec0aa62-2")
+                or html.find("h1", class_="styles__SeriesTitle-sc-22d8e9ab-1")
+                or html.find("h1", class_="styles__SeriesTitle-sc-3de48f0c-1")
+                or html.find("h1", class_="styles__SeriesTitle-sc-65abd048-1")
+            )
             if title:
                 title = title.text.strip()
             titles[url] = title
 
         return titles
 
-    def run(self, force=False):
-        if self.is_running == False:
-            self.is_running = True
+    @classmethod
+    def _generate_outfile(cls, start_id, stop_id):
+        now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        return os.path.join(
+            get_application_path(),
+            "output",
+            f"{now}_{start_id}-{stop_id}.csv",
+        )
 
-            self.urls_to_titles = self._get_titles()
-            # print(f"\n{self.urls_to_titles}")
+    @classmethod
+    def run(cls, start_id: int, stop_id: int, outfile: str, n_concurrent_windows: int):
+        if outfile == "":
+            outfile = cls._generate_outfile(start_id, stop_id)
 
-            print(f"\nUnresolved failed connections: {self.failed_connections}")
+        urls = [f"https://www.axs.com/series/{id}/" for id in range(start_id, stop_id + 1)]
 
-            print(f"\nSaving results")
+        # run scraper
+        scraper = Webscraper(n_concurrent_windows)
+        urls_to_htmls = asyncio.run(scraper.get_htmls(urls))
+        urls_to_titles = cls._get_titles(urls_to_htmls)
+        # print(f"\n{self.urls_to_titles}")
 
-            dirname = os.path.dirname(self.outfile)
-            if dirname != "" and not os.path.exists(dirname):
-                os.makedirs(dirname)
+        print(f"\nUnresolved failed connections: {scraper.failed_connections}")
+        print(f"\nSaving results")
 
-            with open(self.outfile, mode='w', encoding="utf-8") as file:
-                file.write(f"URL,Title\n")
-                for url, title in self.urls_to_titles.items():
-                    file.write(f"{url},{title}\n")
+        dirname = os.path.dirname(outfile)
+        if dirname != "" and not os.path.exists(dirname):
+            os.makedirs(dirname)
 
-            print(f"\nResults stored in {self.outfile}")
+        with open(outfile, mode="w", encoding="utf-8") as file:
+            file.write(f"URL,Title\n")
+            for url, title in urls_to_titles.items():
+                file.write(f"{url},{title}\n")
 
-            self.is_running = False
+        print(f"\nResults stored in {outfile}")
+
+class GoogleFilterWebscraper(Webscraper):
+    def __init__(self):
+        ...
+
+
+#===============================================================================
+# GUI
+#===============================================================================
+
+class AxsWebscraperGui:
+    def __init__(self): ...
 
 
 class AxsGui:
@@ -190,22 +219,23 @@ class AxsGui:
 
         # STOP ID
         self.stop_id_label = tk.Label(self.root, text="*Stop ID:")
-        self.stop_id_label.pack(pady=(10,0))
+        self.stop_id_label.pack(pady=(10, 0))
         self.stop_id_entry = tk.Entry(self.root)
         self.stop_id_entry.pack()
 
         # NUMBER OF CONCURRENT WINDOWS
-        self.concurrent_windows_label = tk.Label(self.root, text="*No. of concurrent windows:")
-        self.concurrent_windows_label.pack(pady=(10,0))
+        self.concurrent_windows_label = tk.Label(
+            self.root, text="*No. of concurrent windows:"
+        )
+        self.concurrent_windows_label.pack(pady=(10, 0))
         self.concurrent_windows_entry = tk.Entry(self.root)
         self.concurrent_windows_entry.pack()
         default_concurrent_windows = "5"
         self.concurrent_windows_entry.insert(0, default_concurrent_windows)
 
-
         # FILE SELECTION
         self.filename_label = tk.Label(self.root, text="Filename:")
-        self.filename_label.pack(pady=(10,0))
+        self.filename_label.pack(pady=(10, 0))
 
         self.filename_frame = tk.Frame(self.root)
         self.filename_frame.pack(pady=5)
@@ -213,30 +243,40 @@ class AxsGui:
         self.filename_entry = tk.Entry(self.filename_frame, width=30)
         self.filename_entry.pack(side=tk.LEFT, expand=True, fill=tk.X)
 
-        self.file_img = Image.open(self.get_asset_path(os.path.join("assets", "file.png")))
+        self.file_img = Image.open(
+            self.get_asset_path(os.path.join("assets", "file.png"))
+        )
         width, height = self.file_img.size
-        self.file_img_resized = self.file_img.resize((width//7, height//7))
+        self.file_img_resized = self.file_img.resize((width // 7, height // 7))
         self.file_img_tk = ImageTk.PhotoImage(self.file_img_resized)
 
-        self.select_folder_button = tk.Button(self.filename_frame, image=self.file_img_tk, command=self._select_folder)
+        self.select_folder_button = tk.Button(
+            self.filename_frame, image=self.file_img_tk, command=self._select_folder
+        )
         # self.select_folder_button = tk.Button(self.filename_frame, image=self.file_img_tk, command=lambda: print("foo"))
         self.select_folder_button.pack(side=tk.RIGHT, ipadx=2, ipady=2)
 
         # RUN
-        self.run_button = tk.Button(self.root, text="Run", command=lambda: threading.Thread(target=self.scrape, daemon=True).start())
-        self.run_button.pack(pady=(10,0))
+        self.run_button = tk.Button(
+            self.root,
+            text="Run",
+            command=lambda: threading.Thread(target=self.scrape, daemon=True).start(),
+        )
+        self.run_button.pack(pady=(10, 0))
 
         # OUTPUT WINDOW
         self.output_label = tk.Label(self.root, text="Output:")
-        self.output_label.pack(pady=(30,0))
+        self.output_label.pack(pady=(30, 0))
         self.output_text = tk.Text(self.root, height=20, width=50, state=tk.DISABLED)
         self.output_text.pack(expand=True, fill=tk.X)
 
         self._connect_output_to_tk_text_widget()
 
     def get_asset_path(self, filename):
-        if getattr(sys, 'frozen', False):  # if running as bundled executable
-            base_path = sys._MEIPASS  # pyinstaller temporary folder for bundled files (https://stackoverflow.com/questions/51060894/adding-a-data-file-in-pyinstaller-using-the-onefile-option)
+        if getattr(sys, "frozen", False):  # if running as bundled executable
+            base_path = (
+                sys._MEIPASS
+            )  # pyinstaller temporary folder for bundled files (https://stackoverflow.com/questions/51060894/adding-a-data-file-in-pyinstaller-using-the-onefile-option)
         else:
             base_path = os.path.abspath(".")
 
@@ -254,10 +294,14 @@ class AxsGui:
                 self.text_widget.insert(tk.END, message)
                 self.text_widget.see(tk.END)  # scroll to the end
                 self.text_widget["state"] = initial_state
-                if self.fd == 1 and sys.__stdout__ != None: # if connected to stdout (not true when run from pyinstaller executable that was built with --noconsole)
-                    sys.__stdout__.write(message) # write to original stdout
-                if self.fd == 2 and sys.__stderr__ != None: # if connected to stderr (not true when run from pyinstaller executable that was built with --noconsole)
-                    sys.__stderr__.write(message) # write to original stdout
+                if (
+                    self.fd == 1 and sys.__stdout__ != None
+                ):  # if connected to stdout (not true when run from pyinstaller executable that was built with --noconsole)
+                    sys.__stdout__.write(message)  # write to original stdout
+                if (
+                    self.fd == 2 and sys.__stderr__ != None
+                ):  # if connected to stderr (not true when run from pyinstaller executable that was built with --noconsole)
+                    sys.__stderr__.write(message)  # write to original stdout
 
             def flush(self):
                 pass
@@ -266,7 +310,6 @@ class AxsGui:
             sys.stdout = OutputRedirector(self.output_text, 1)
         if stderr:
             sys.stderr = OutputRedirector(self.output_text, 2)
-
 
     def _select_folder(self):
         folder_selected = filedialog.asksaveasfilename()
@@ -308,20 +351,24 @@ class AxsGui:
             return
         if not self.is_running:
             self.is_running = True
-            start_time = time.time()                           # ----- Benchmark start ----- #
+            start_time = time.time()  # ----- Benchmark start ----- #
 
             print("\nStarting scrape:\n")
-            scraper = AxsWebscraper(self.start_id, self.stop_id, self.concurrent_windows, self.outfile)
-            scraper.run()
+            AxsSeriesWebscraper.run(
+                self.start_id, self.stop_id, self.outfile, self.concurrent_windows
+            )
             print("\nFinished scrape")
 
-            print(f"Time elapsed: {time.time() - start_time:.2f}s") # ----- Benchmark stop ----- #
+            print(
+                f"Time elapsed: {time.time() - start_time:.2f}s"
+            )  # ----- Benchmark stop ----- #
             self.is_running = False
         else:
             print("\nScrape already in progress\n")
 
     def run(self):
         self.root.mainloop()
+
 
 def main():
     # parse cli arguments
