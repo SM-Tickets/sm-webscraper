@@ -34,6 +34,13 @@
         # packages with depended-on dynamic libraries
         NIX_LD_LIBRARY_PATH = lib.makeLibraryPath [
           pkgs.stdenv.cc.cc
+          pkgs.libGL
+          pkgs.fontconfig
+          pkgs.libx11
+          pkgs.libxkbcommon
+          pkgs.freetype
+          pkgs.dbus
+          pkgs.wayland
           # ... <- add nix packages with depended-on dynamic libraries here
         ];
 

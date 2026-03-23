@@ -3,19 +3,41 @@ import sys
 import time
 import datetime
 import threading
+from abc import abstractmethod
 
 import tkinter as tk
 from tkinter import filedialog
 from PIL import Image, ImageTk
 
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QHBoxLayout,
+    QVBoxLayout,
+    QListWidget,
+    QStackedWidget,
+    QLabel,
+    QPlainTextEdit,
+    QFormLayout,
+    QLineEdit,
+    QSpinBox,
+    QFileDialog,
+    QPushButton,
+    QFileIconProvider,
+)
+
 import asyncio
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
+num_cores = os.cpu_count() or 1
 
-#===============================================================================
+# ===============================================================================
 # UTILS
-#===============================================================================
+# ===============================================================================
+
 
 def get_application_path():
     if getattr(sys, "frozen", False):  # if running as bundled executable
@@ -39,9 +61,10 @@ if not os.environ["PLAYWRIGHT_BROWSERS_PATH"]:
 print(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
 
 
-#===============================================================================
+# ===============================================================================
 # IMPLEMENTATION CLASSES
-#===============================================================================
+# ===============================================================================
+
 
 class Webscraper:
     def __init__(self, n_concurrent_windows):
@@ -74,6 +97,7 @@ class Webscraper:
             try:
                 print(f"sending request to {url}")
                 await page.goto(url)
+                # await page.pause()
 
             except Exception as err:
                 print(f"error for {url}:")
@@ -104,9 +128,7 @@ class Webscraper:
 
         # get html of each url
         #   - note that the result is in the same order as the passed-in list of coros
-        urls_to_raw_htmls = await asyncio.gather(
-            *coros
-        )
+        urls_to_raw_htmls = await asyncio.gather(*coros)
 
         # retry failed connections up to 10 times
         for _ in range(10):
@@ -125,10 +147,15 @@ class Webscraper:
             for url, html in url_to_raw_html.items()
         }
 
+    @abstractmethod
+    def run():
+        pass
+
+
 class AxsSeriesWebscraper(Webscraper):
 
     @classmethod
-    def _get_titles(cls, urls_to_htmls: dict[str, str]):
+    def get_titles(cls, urls_to_htmls: dict[str, str]):
         """Parse the html for the title of the series
 
         Returns:
@@ -154,7 +181,7 @@ class AxsSeriesWebscraper(Webscraper):
         return titles
 
     @classmethod
-    def _generate_outfile(cls, start_id, stop_id):
+    def generate_outfile(cls, start_id, stop_id):
         now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         return os.path.join(
             get_application_path(),
@@ -165,15 +192,16 @@ class AxsSeriesWebscraper(Webscraper):
     @classmethod
     def run(cls, start_id: int, stop_id: int, outfile: str, n_concurrent_windows: int):
         if outfile == "":
-            outfile = cls._generate_outfile(start_id, stop_id)
+            outfile = cls.generate_outfile(start_id, stop_id)
 
-        urls = [f"https://www.axs.com/series/{id}/" for id in range(start_id, stop_id + 1)]
+        urls = [
+            f"https://www.axs.com/series/{id}/" for id in range(start_id, stop_id + 1)
+        ]
 
         # run scraper
         scraper = Webscraper(n_concurrent_windows)
         urls_to_htmls = asyncio.run(scraper.get_htmls(urls))
-        urls_to_titles = cls._get_titles(urls_to_htmls)
-        # print(f"\n{self.urls_to_titles}")
+        urls_to_titles = cls.get_titles(urls_to_htmls)
 
         print(f"\nUnresolved failed connections: {scraper.failed_connections}")
         print(f"\nSaving results")
@@ -189,18 +217,15 @@ class AxsSeriesWebscraper(Webscraper):
 
         print(f"\nResults stored in {outfile}")
 
+
 class GoogleFilterWebscraper(Webscraper):
-    def __init__(self):
-        ...
+
+    def run(): ...
 
 
-#===============================================================================
+# ===============================================================================
 # GUI
-#===============================================================================
-
-class AxsWebscraperGui:
-    def __init__(self): ...
-
+# ===============================================================================
 
 class AxsGui:
     def __init__(self):
@@ -370,16 +395,190 @@ class AxsGui:
         self.root.mainloop()
 
 
-def main():
-    # parse cli arguments
-    # argc = len(sys.argv) - 1
-    # if argc != 2:
-    #     print(f"Incorrect number of arguments: Expected 2 arguments (start, stop) but received {argc}")
-    #     sys.exit()
-    # start_id, stop_id = int(sys.argv[1]), int(sys.argv[2])
+class LoggerWidget(QWidget):
+    def __init__(self):
+        super().__init__()
 
-    gui = AxsGui()
-    gui.run()
+        text = QPlainTextEdit()
+        text.setReadOnly(True)
+        text.insertPlainText("hello world")
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(text)
+        self.setLayout(layout)
+
+class FileSelectorWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        provider = QFileIconProvider()
+
+        self.line_edit = QLineEdit(self)
+        self.push_button = QPushButton(provider.icon(QFileIconProvider.IconType.File), "", self)
+        self.push_button.clicked.connect(self.select)
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.line_edit)
+        layout.addWidget(self.push_button)
+        self.setLayout(layout)
+
+    def select(self):
+        selected, _ = QFileDialog.getSaveFileName(self, "Save to", "")
+        if selected:
+            self.line_edit.setText(selected)
+
+
+
+class AxsSeriesWebscraperWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.is_running = False
+
+        # Widgets
+        self.start_id_line_edit = QLineEdit(self)
+        self.stop_id_line_edit = QLineEdit(self)
+        self.concurrent_windows_spin_box = QSpinBox(self)
+        self.outfile_widget = FileSelectorWidget()
+        self.run_push_button = QPushButton("Run", self)
+        self.logger_widget = LoggerWidget()
+
+        # Widget configuration
+        self.concurrent_windows_spin_box.setMinimum(1)
+        self.concurrent_windows_spin_box.setMaximum(num_cores)
+        self.concurrent_windows_spin_box.setValue(num_cores)
+        self.run_push_button.clicked.connect(self.run)
+
+        # Layouts
+        form_layout = QFormLayout()
+        form_layout.addRow("Start ID:", self.start_id_line_edit)
+        form_layout.addRow("Stop ID:", self.stop_id_line_edit)
+        form_layout.addRow("Windows:", self.concurrent_windows_spin_box)
+        form_layout.addRow("Save to:", self.outfile_widget)
+
+        main_layout = QVBoxLayout()
+        main_layout.addLayout(form_layout)
+        main_layout.addWidget(self.run_push_button)
+        main_layout.addWidget(self.logger_widget)
+        self.setLayout(main_layout)
+
+    @property
+    def start_id(self):
+        if self.start_id_line_edit.text() == "":
+            return -1
+        return int(self.start_id_line_edit.text())
+
+    @property
+    def stop_id(self):
+        if self.stop_id_line_edit.text() == "":
+            return -1
+        return int(self.stop_id_line_edit.text())
+
+    @property
+    def concurrent_windows(self):
+        return self.concurrent_windows_spin_box.value()
+
+    @property
+    def outfile(self):
+        return self.outfile_widget.line_edit.text()
+
+    def run(self):
+        if self.start_id == -1:
+            print("Need to provide a start_id")
+            return
+
+        if self.stop_id == -1:
+            print("Need to provide a stop_id")
+            return
+
+        if not self.is_running:
+            self.is_running = True
+
+            # ----- Benchmark start ----- #
+            start_time = time.time()
+
+            print("\nStarting scrape:\n")
+
+            AxsSeriesWebscraper.run(
+                self.start_id, self.stop_id, self.outfile, self.concurrent_windows
+            )
+
+            print("\nFinished scrape")
+
+            print(
+                f"Time elapsed: {time.time() - start_time:.2f}s"
+            )
+            # ----- Benchmark stop ----- #
+
+            self.is_running = False
+        else:
+            print("\nScrape already in progress\n")
+
+
+class GoogleFilterWebscraperWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.start_id_line_edit = QLineEdit(self)
+        self.stop_id_line_edit = QLineEdit(self)
+        self.concurrent_windows_spin_box = QSpinBox(self)
+        self.outfile_widget = FileSelectorWidget()
+        self.run_push_button = QPushButton("Run", self)
+
+        self.concurrent_windows_spin_box.setMinimum(1)
+        self.concurrent_windows_spin_box.setMaximum(num_cores)
+        self.concurrent_windows_spin_box.setValue(num_cores)
+
+        form_layout = QFormLayout()
+        form_layout.addRow("Start ID:", self.start_id_line_edit)
+        form_layout.addRow("Stop ID:", self.stop_id_line_edit)
+        form_layout.addRow("Windows:", self.concurrent_windows_spin_box)
+        form_layout.addRow("Save to:", self.outfile_widget)
+
+        main_layout = QVBoxLayout()
+        main_layout.addLayout(form_layout)
+        main_layout.addWidget(self.run_push_button)
+        main_layout.addWidget(LoggerWidget())
+        self.setLayout(main_layout)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        # Sidebar
+        self.sidebar = QListWidget()
+        self.sidebar.addItem("AXS Series")
+        self.sidebar.addItem("AXS Google Filter")
+        self.sidebar.setFixedWidth(150)
+
+        # Stack
+        self.stack = QStackedWidget()
+        self.stack.addWidget(AxsSeriesWebscraperWidget())  # index 0
+        self.stack.addWidget(GoogleFilterWebscraperWidget())  # index 1
+
+        # Connect sidebar to stack
+        self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)
+
+        # Layout
+        layout = QHBoxLayout()
+        layout.addWidget(self.sidebar)
+        layout.addWidget(self.stack)
+
+        container = QWidget()
+        container.setLayout(layout)
+        self.setCentralWidget(container)
+
+        self.sidebar.setCurrentRow(0)  # default page
+
+
+def main():
+    app = QApplication([])
+    window = MainWindow()
+    window.show()
+    app.exec()
 
 
 if __name__ == "__main__":

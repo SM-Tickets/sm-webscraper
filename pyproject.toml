@@ -1,0 +1,19 @@
+[project]
+name = "axs-webscraper"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "altgraph==0.17.4",
+    "beautifulsoup4==4.12.3",
+    "greenlet==3.1.1",
+    "macholib==1.16.3",
+    "packaging==24.1",
+    "pillow==11.0.0",
+    "playwright==1.48.0",
+    "pyee==12.0.0",
+    "pyinstaller==6.11.0",
+    "pyinstaller-hooks-contrib==2024.9",
+    "pyside6>=6.10.2",
+    "soupsieve==2.6",
+    "typing-extensions==4.12.2",
+]
