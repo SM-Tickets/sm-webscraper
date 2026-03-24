@@ -34,6 +34,8 @@
         # packages with depended-on dynamic libraries
         NIX_LD_LIBRARY_PATH = lib.makeLibraryPath [
           pkgs.stdenv.cc.cc
+          pkgs.zstd
+          pkgs.glib
           pkgs.libGL
           pkgs.fontconfig
           pkgs.libx11
@@ -41,6 +43,24 @@
           pkgs.freetype
           pkgs.dbus
           pkgs.wayland
+
+          pkgs.nss
+          pkgs.nspr
+          pkgs.at-spi2-atk
+          pkgs.cups
+          pkgs.libdrm
+          pkgs.expat
+          pkgs.libxcb
+          pkgs.libxcomposite
+          pkgs.libxdamage
+          pkgs.libxext
+          pkgs.libxfixes
+          pkgs.libxrandr
+          pkgs.libgbm
+          pkgs.pango
+          pkgs.cairo
+          pkgs.eudev
+          pkgs.alsa-lib
           # ... <- add nix packages with depended-on dynamic libraries here
         ];
 
@@ -49,7 +69,7 @@
           # force the use of the ld wrapper provided by nix-ld even for python interpreters patched for nix
           export LD_LIBRARY_PATH=$NIX_LD_LIBRARY_PATH
 
-          export PLAYWRIGHT_BROWSERS_PATH=${pkgs.playwright-driver.browsers}
+          # export PLAYWRIGHT_BROWSERS_PATH=${pkgs.playwright-driver.browsers}
         '';
       };
     };

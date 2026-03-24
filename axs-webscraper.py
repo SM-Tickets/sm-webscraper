@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import filedialog
 from PIL import Image, ImageTk
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QDate
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -26,13 +26,16 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QPushButton,
     QFileIconProvider,
+    QDateEdit,
+    QSizePolicy
 )
 
 import asyncio
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
-num_cores = os.cpu_count() or 1
+DEBUG = True
+NUM_CORES = os.cpu_count() or 1
 
 # ===============================================================================
 # UTILS
@@ -54,7 +57,7 @@ def get_application_path():
         return os.path.dirname(__file__)
 
 
-if not os.environ["PLAYWRIGHT_BROWSERS_PATH"]:
+if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(
         get_application_path(), "browser_drivers"
     )
@@ -67,14 +70,16 @@ print(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
 
 
 class Webscraper:
-    def __init__(self, n_concurrent_windows):
-        self.semaphore = asyncio.Semaphore(int(n_concurrent_windows))
+    def __init__(self, num_concurrent_wins):
+        self.semaphore = asyncio.Semaphore(int(num_concurrent_wins))
         self.failed_connections = []
 
     async def _start_browser(self):
         playwright = await async_playwright().start()
-        browser = await playwright.chromium.launch(headless=True)
-        # browser = await playwright.chromium.launch(headless=False, slow_mo=10000)
+        if DEBUG:
+            browser = await playwright.chromium.launch(headless=False, slow_mo=10000)
+        else:
+            browser = await playwright.chromium.launch(headless=True)
         return browser, playwright
 
     async def _close_browser(self, playwright, browser):
@@ -92,12 +97,14 @@ class Webscraper:
         """
         async with self.semaphore:
             user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36"
+            # user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
             context = await browser.new_context(user_agent=user_agent)
             page = await context.new_page()
             try:
                 print(f"sending request to {url}")
                 await page.goto(url)
-                # await page.pause()
+                if DEBUG:
+                    await page.pause()
 
             except Exception as err:
                 print(f"error for {url}:")
@@ -147,10 +154,6 @@ class Webscraper:
             for url, html in url_to_raw_html.items()
         }
 
-    @abstractmethod
-    def run():
-        pass
-
 
 class AxsSeriesWebscraper(Webscraper):
 
@@ -186,11 +189,11 @@ class AxsSeriesWebscraper(Webscraper):
         return os.path.join(
             get_application_path(),
             "output",
-            f"{now}_{start_id}-{stop_id}.csv",
+            f"axs-series_{now}_{start_id}-{stop_id}.csv",
         )
 
     @classmethod
-    def run(cls, start_id: int, stop_id: int, outfile: str, n_concurrent_windows: int):
+    def run(cls, start_id: int, stop_id: int, outfile: str, num_concurrent_wins: int):
         if outfile == "":
             outfile = cls.generate_outfile(start_id, stop_id)
 
@@ -199,7 +202,7 @@ class AxsSeriesWebscraper(Webscraper):
         ]
 
         # run scraper
-        scraper = Webscraper(n_concurrent_windows)
+        scraper = Webscraper(num_concurrent_wins)
         urls_to_htmls = asyncio.run(scraper.get_htmls(urls))
         urls_to_titles = cls.get_titles(urls_to_htmls)
 
@@ -220,180 +223,56 @@ class AxsSeriesWebscraper(Webscraper):
 
 class GoogleFilterWebscraper(Webscraper):
 
-    def run(): ...
+    @classmethod
+    def get_links(cls, urls_to_htmls: dict[str, str]):
+        all_links = []
+
+        print("Parsing responses...")
+        for url, html in urls_to_htmls.items():
+            html = BeautifulSoup(html, "html.parser")
+            links = (
+                html.find_all("a", class_="zReHs")
+            )
+            if len(links) > 0:
+                all_links.extend([link["href"] for link in links])
+
+        return all_links
+
+    @classmethod
+    def generate_outfile(cls):
+        now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        return os.path.join(
+            get_application_path(),
+            "output",
+            f"axs-google-filter_{now}.csv",
+        )
+
+    @classmethod
+    def run(cls, keywords: list[str], after: str, outfile: str, num_concurrent_wins: int):
+        if outfile == "":
+            outfile = cls.generate_outfile()
+
+        keywords = [ f'"{keyword}"' for keyword in keywords ]
+        # construct query
+        url = "https://www.google.com/search?q=site:www.axs.com"
+        url += "+" + "+".join(keywords)
+        url += f"+after:{after}"
+
+        urls = [url]
+
+        scraper = Webscraper(num_concurrent_wins)
+        urls_to_htmls = asyncio.run(scraper.get_htmls(urls))
+        links = cls.get_links(urls_to_htmls)
+
+        with open(outfile, mode="w", encoding="utf-8") as file:
+            file.write(f"URL,Title\n")
+            for link in links:
+                file.write(f"{link}\n")
 
 
 # ===============================================================================
 # GUI
 # ===============================================================================
-
-class AxsGui:
-    def __init__(self):
-        self.is_running = False
-
-        # ROOT
-        self.root = tk.Tk()
-        self.root.title("AXS Webscraper")
-        self.root.geometry("500x600")
-
-        # START ID
-        self.start_id_label = tk.Label(self.root, text="*Start ID:")
-        self.start_id_label.pack()
-        self.start_id_entry = tk.Entry(self.root)
-        self.start_id_entry.pack()
-
-        # STOP ID
-        self.stop_id_label = tk.Label(self.root, text="*Stop ID:")
-        self.stop_id_label.pack(pady=(10, 0))
-        self.stop_id_entry = tk.Entry(self.root)
-        self.stop_id_entry.pack()
-
-        # NUMBER OF CONCURRENT WINDOWS
-        self.concurrent_windows_label = tk.Label(
-            self.root, text="*No. of concurrent windows:"
-        )
-        self.concurrent_windows_label.pack(pady=(10, 0))
-        self.concurrent_windows_entry = tk.Entry(self.root)
-        self.concurrent_windows_entry.pack()
-        default_concurrent_windows = "5"
-        self.concurrent_windows_entry.insert(0, default_concurrent_windows)
-
-        # FILE SELECTION
-        self.filename_label = tk.Label(self.root, text="Filename:")
-        self.filename_label.pack(pady=(10, 0))
-
-        self.filename_frame = tk.Frame(self.root)
-        self.filename_frame.pack(pady=5)
-
-        self.filename_entry = tk.Entry(self.filename_frame, width=30)
-        self.filename_entry.pack(side=tk.LEFT, expand=True, fill=tk.X)
-
-        self.file_img = Image.open(
-            self.get_asset_path(os.path.join("assets", "file.png"))
-        )
-        width, height = self.file_img.size
-        self.file_img_resized = self.file_img.resize((width // 7, height // 7))
-        self.file_img_tk = ImageTk.PhotoImage(self.file_img_resized)
-
-        self.select_folder_button = tk.Button(
-            self.filename_frame, image=self.file_img_tk, command=self._select_folder
-        )
-        # self.select_folder_button = tk.Button(self.filename_frame, image=self.file_img_tk, command=lambda: print("foo"))
-        self.select_folder_button.pack(side=tk.RIGHT, ipadx=2, ipady=2)
-
-        # RUN
-        self.run_button = tk.Button(
-            self.root,
-            text="Run",
-            command=lambda: threading.Thread(target=self.scrape, daemon=True).start(),
-        )
-        self.run_button.pack(pady=(10, 0))
-
-        # OUTPUT WINDOW
-        self.output_label = tk.Label(self.root, text="Output:")
-        self.output_label.pack(pady=(30, 0))
-        self.output_text = tk.Text(self.root, height=20, width=50, state=tk.DISABLED)
-        self.output_text.pack(expand=True, fill=tk.X)
-
-        self._connect_output_to_tk_text_widget()
-
-    def get_asset_path(self, filename):
-        if getattr(sys, "frozen", False):  # if running as bundled executable
-            base_path = (
-                sys._MEIPASS
-            )  # pyinstaller temporary folder for bundled files (https://stackoverflow.com/questions/51060894/adding-a-data-file-in-pyinstaller-using-the-onefile-option)
-        else:
-            base_path = os.path.abspath(".")
-
-        return os.path.join(base_path, filename)
-
-    def _connect_output_to_tk_text_widget(self, stdout=True, stderr=True):
-        class OutputRedirector:
-            def __init__(self, text_widget, fd):
-                self.text_widget = text_widget
-                self.fd = fd
-
-            def write(self, message):
-                initial_state = self.text_widget["state"]
-                self.text_widget["state"] = tk.NORMAL
-                self.text_widget.insert(tk.END, message)
-                self.text_widget.see(tk.END)  # scroll to the end
-                self.text_widget["state"] = initial_state
-                if (
-                    self.fd == 1 and sys.__stdout__ != None
-                ):  # if connected to stdout (not true when run from pyinstaller executable that was built with --noconsole)
-                    sys.__stdout__.write(message)  # write to original stdout
-                if (
-                    self.fd == 2 and sys.__stderr__ != None
-                ):  # if connected to stderr (not true when run from pyinstaller executable that was built with --noconsole)
-                    sys.__stderr__.write(message)  # write to original stdout
-
-            def flush(self):
-                pass
-
-        if stdout:
-            sys.stdout = OutputRedirector(self.output_text, 1)
-        if stderr:
-            sys.stderr = OutputRedirector(self.output_text, 2)
-
-    def _select_folder(self):
-        folder_selected = filedialog.asksaveasfilename()
-        if folder_selected:
-            self.filename_entry.delete(0, tk.END)
-            self.filename_entry.insert(0, folder_selected)
-
-    @property
-    def start_id(self):
-        if self.start_id_entry.get() == "":
-            return -1
-        return int(self.start_id_entry.get())
-
-    @property
-    def stop_id(self):
-        if self.stop_id_entry.get() == "":
-            return -1
-        return int(self.stop_id_entry.get())
-
-    @property
-    def concurrent_windows(self):
-        if self.concurrent_windows_entry.get() == "":
-            return -1
-        return int(self.concurrent_windows_entry.get())
-
-    @property
-    def outfile(self):
-        return self.filename_entry.get()
-
-    def scrape(self):
-        if self.start_id == -1:
-            print("Need to provide a start_id")
-            return
-        if self.stop_id == -1:
-            print("Need to provide a stop_id")
-            return
-        if self.concurrent_windows == -1:
-            print("Need to provide the number of concurrent windows")
-            return
-        if not self.is_running:
-            self.is_running = True
-            start_time = time.time()  # ----- Benchmark start ----- #
-
-            print("\nStarting scrape:\n")
-            AxsSeriesWebscraper.run(
-                self.start_id, self.stop_id, self.outfile, self.concurrent_windows
-            )
-            print("\nFinished scrape")
-
-            print(
-                f"Time elapsed: {time.time() - start_time:.2f}s"
-            )  # ----- Benchmark stop ----- #
-            self.is_running = False
-        else:
-            print("\nScrape already in progress\n")
-
-    def run(self):
-        self.root.mainloop()
-
 
 class LoggerWidget(QWidget):
     def __init__(self):
@@ -429,6 +308,38 @@ class FileSelectorWidget(QWidget):
         if selected:
             self.line_edit.setText(selected)
 
+class DateSelectorWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.date_edit = QDateEdit(self)
+        self.today_push_button = QPushButton("Today", self)
+        self.month_inc_push_button = QPushButton("+1m", self)
+        self.month_dec_push_button = QPushButton("-1m", self)
+        self.day_inc_push_button = QPushButton("+1d", self)
+        self.day_dec_push_button = QPushButton("-1d", self)
+
+        self.today_push_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.month_inc_push_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.month_dec_push_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.day_inc_push_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.day_dec_push_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        self.today_push_button.pressed.connect(lambda: self.date_edit.setDate(QDate.currentDate()))
+        self.month_inc_push_button.pressed.connect(lambda: self.date_edit.setDate(self.date_edit.date().addMonths(1)))
+        self.month_dec_push_button.pressed.connect(lambda: self.date_edit.setDate(self.date_edit.date().addMonths(-1)))
+        self.day_inc_push_button.pressed.connect(lambda: self.date_edit.setDate(self.date_edit.date().addDays(1)))
+        self.day_dec_push_button.pressed.connect(lambda: self.date_edit.setDate(self.date_edit.date().addDays(-1)))
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.date_edit)
+        layout.addWidget(self.today_push_button)
+        layout.addWidget(self.month_inc_push_button)
+        layout.addWidget(self.month_dec_push_button)
+        layout.addWidget(self.day_inc_push_button)
+        layout.addWidget(self.day_dec_push_button)
+        self.setLayout(layout)
 
 
 class AxsSeriesWebscraperWidget(QWidget):
@@ -447,8 +358,8 @@ class AxsSeriesWebscraperWidget(QWidget):
 
         # Widget configuration
         self.concurrent_windows_spin_box.setMinimum(1)
-        self.concurrent_windows_spin_box.setMaximum(num_cores)
-        self.concurrent_windows_spin_box.setValue(num_cores)
+        self.concurrent_windows_spin_box.setMaximum(NUM_CORES)
+        self.concurrent_windows_spin_box.setValue(NUM_CORES)
         self.run_push_button.clicked.connect(self.run)
 
         # Layouts
@@ -521,19 +432,24 @@ class GoogleFilterWebscraperWidget(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.start_id_line_edit = QLineEdit(self)
-        self.stop_id_line_edit = QLineEdit(self)
+        self.is_running = False
+
+        self.keywords_line_edit = QLineEdit(self)
+        self.oldest_date_edit = DateSelectorWidget()
         self.concurrent_windows_spin_box = QSpinBox(self)
         self.outfile_widget = FileSelectorWidget()
         self.run_push_button = QPushButton("Run", self)
 
+        self.keywords_line_edit.setText("CODE,PROMO")
         self.concurrent_windows_spin_box.setMinimum(1)
-        self.concurrent_windows_spin_box.setMaximum(num_cores)
-        self.concurrent_windows_spin_box.setValue(num_cores)
+        self.concurrent_windows_spin_box.setMaximum(NUM_CORES)
+        self.concurrent_windows_spin_box.setValue(NUM_CORES)
+        self.oldest_date_edit.date_edit.setDate(QDate.currentDate().addMonths(-1))
+        self.run_push_button.clicked.connect(self.run)
 
         form_layout = QFormLayout()
-        form_layout.addRow("Start ID:", self.start_id_line_edit)
-        form_layout.addRow("Stop ID:", self.stop_id_line_edit)
+        form_layout.addRow("Keywords:", self.keywords_line_edit)
+        form_layout.addRow("Newer than:", self.oldest_date_edit)
         form_layout.addRow("Windows:", self.concurrent_windows_spin_box)
         form_layout.addRow("Save to:", self.outfile_widget)
 
@@ -542,6 +458,44 @@ class GoogleFilterWebscraperWidget(QWidget):
         main_layout.addWidget(self.run_push_button)
         main_layout.addWidget(LoggerWidget())
         self.setLayout(main_layout)
+
+    @property
+    def keywords(self):
+        return self.keywords_line_edit.text().split(",")
+
+    @property
+    def after_date(self):
+        return self.oldest_date_edit.date_edit.date().toString(Qt.ISODate)
+
+    @property
+    def concurrent_windows(self):
+        return self.concurrent_windows_spin_box.value()
+
+    @property
+    def outfile(self):
+        return self.outfile_widget.line_edit.text()
+
+    def run(self):
+        if not self.is_running:
+            self.is_running = True
+
+            # ----- Benchmark start ----- #
+            start_time = time.time()
+
+            print("\nStarting scrape:\n")
+
+            GoogleFilterWebscraper.run(self.keywords, self.after_date, self.outfile, self.concurrent_windows)
+
+            print("\nFinished scrape")
+
+            print(
+                f"Time elapsed: {time.time() - start_time:.2f}s"
+            )
+            # ----- Benchmark stop ----- #
+
+            self.is_running = False
+        else:
+            print("\nScrape already in progress\n")
 
 
 class MainWindow(QMainWindow):
