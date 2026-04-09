@@ -2,6 +2,8 @@ import os
 import sys
 import time
 import datetime
+import random
+import argparse
 import threading
 from abc import abstractmethod
 
@@ -9,7 +11,7 @@ import tkinter as tk
 from tkinter import filedialog
 from PIL import Image, ImageTk
 
-from PySide6.QtCore import Qt, QDate
+from PySide6.QtCore import Qt, QDate, Signal, QObject, QThread
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -34,7 +36,7 @@ import asyncio
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
-DEBUG = True
+DEBUG = False
 NUM_CORES = os.cpu_count() or 1
 
 # ===============================================================================
@@ -70,16 +72,38 @@ print(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
 
 
 class Webscraper:
-    def __init__(self, num_concurrent_wins):
+    def __init__(self, num_concurrent_wins, log_callback=None):
         self.semaphore = asyncio.Semaphore(int(num_concurrent_wins))
         self.failed_connections = []
+        self.log_callback = log_callback or print
+
+    @staticmethod
+    def _get_browser_args():
+        return [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-accelerated-2d-canvas",
+            "--no-first-run",
+            "--no-zygote",
+            "--disable-gpu",
+        ]
 
     async def _start_browser(self):
         playwright = await async_playwright().start()
         if DEBUG:
-            browser = await playwright.chromium.launch(headless=False, slow_mo=10000)
+            browser = await playwright.chromium.launch(
+                headless=False,
+                slow_mo=10000,
+                args=self._get_browser_args(),
+            )
         else:
-            browser = await playwright.chromium.launch(headless=True)
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=self._get_browser_args(),
+            )
         return browser, playwright
 
     async def _close_browser(self, playwright, browser):
@@ -96,29 +120,51 @@ class Webscraper:
             dict{str: str}: Mapping of url to raw html
         """
         async with self.semaphore:
-            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36"
-            # user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
-            context = await browser.new_context(user_agent=user_agent)
+            user_agent = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+            )
+            stealth_script = """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                });
+            """
+            context = await browser.new_context(
+                user_agent=user_agent,
+                locale="en-US",
+                timezone_id="America/New_York",
+                viewport={"width": 1920, "height": 1080},
+                permissions=["geolocation"],
+            )
+            await context.add_init_script(stealth_script)
             page = await context.new_page()
             try:
-                print(f"sending request to {url}")
+                self.log_callback(f"sending request to {url}")
                 await page.goto(url)
                 if DEBUG:
                     await page.pause()
 
             except Exception as err:
-                print(f"error for {url}:")
-                print(err)
+                self.log_callback(f"error for {url}:")
+                self.log_callback(str(err))
                 self.failed_connections.append(url)
                 await page.close()
                 return {url: ""}
 
-            print(f"received response from {url}")
+            self.log_callback(f"received response from {url}")
 
             if url in self.failed_connections:
                 self.failed_connections.remove(url)
             html = await page.content()
             await context.close()
+
+            await asyncio.sleep(random.uniform(1, 3))
 
         return {url: html}
 
@@ -141,7 +187,7 @@ class Webscraper:
         for _ in range(10):
             if len(self.failed_connections) == 0:
                 break
-            print(f"\nRetrying failed connections:")
+            self.log_callback(f"\nRetrying failed connections:")
             coros = [self._get_html(url, browser) for url in self.failed_connections]
             urls_to_raw_htmls.extend(await asyncio.gather(*coros))
 
@@ -158,15 +204,16 @@ class Webscraper:
 class AxsSeriesWebscraper(Webscraper):
 
     @classmethod
-    def get_titles(cls, urls_to_htmls: dict[str, str]):
+    def get_titles(cls, urls_to_htmls: dict[str, str], log_callback=None):
         """Parse the html for the title of the series
 
         Returns:
             dict{str: str|None}: Mapping of urls to their AXS event titles
         """
         titles = {}
+        log = log_callback or print
 
-        print("Parsing responses...")
+        log("Parsing responses...")
         for url, html in urls_to_htmls.items():
             html = BeautifulSoup(html, "html.parser")
             title = (
@@ -193,7 +240,8 @@ class AxsSeriesWebscraper(Webscraper):
         )
 
     @classmethod
-    def run(cls, start_id: int, stop_id: int, outfile: str, num_concurrent_wins: int):
+    def run(cls, start_id: int, stop_id: int, outfile: str, num_concurrent_wins: int, log_callback=None):
+        log = log_callback or print
         if outfile == "":
             outfile = cls.generate_outfile(start_id, stop_id)
 
@@ -202,12 +250,12 @@ class AxsSeriesWebscraper(Webscraper):
         ]
 
         # run scraper
-        scraper = Webscraper(num_concurrent_wins)
+        scraper = Webscraper(num_concurrent_wins, log_callback=log)
         urls_to_htmls = asyncio.run(scraper.get_htmls(urls))
-        urls_to_titles = cls.get_titles(urls_to_htmls)
+        urls_to_titles = cls.get_titles(urls_to_htmls, log_callback=log)
 
-        print(f"\nUnresolved failed connections: {scraper.failed_connections}")
-        print(f"\nSaving results")
+        log(f"\nUnresolved failed connections: {scraper.failed_connections}")
+        log(f"\nSaving results")
 
         dirname = os.path.dirname(outfile)
         if dirname != "" and not os.path.exists(dirname):
@@ -218,16 +266,17 @@ class AxsSeriesWebscraper(Webscraper):
             for url, title in urls_to_titles.items():
                 file.write(f"{url},{title}\n")
 
-        print(f"\nResults stored in {outfile}")
+        log(f"\nResults stored in {outfile}")
 
 
 class GoogleFilterWebscraper(Webscraper):
 
     @classmethod
-    def get_links(cls, urls_to_htmls: dict[str, str]):
+    def get_links(cls, urls_to_htmls: dict[str, str], log_callback=None):
         all_links = []
+        log = log_callback or print
 
-        print("Parsing responses...")
+        log("Parsing responses...")
         for url, html in urls_to_htmls.items():
             html = BeautifulSoup(html, "html.parser")
             links = (
@@ -248,7 +297,8 @@ class GoogleFilterWebscraper(Webscraper):
         )
 
     @classmethod
-    def run(cls, keywords: list[str], after: str, outfile: str, num_concurrent_wins: int):
+    def run(cls, keywords: list[str], after: str, outfile: str, num_concurrent_wins: int, log_callback=None):
+        log = log_callback or print
         if outfile == "":
             outfile = cls.generate_outfile()
 
@@ -260,9 +310,9 @@ class GoogleFilterWebscraper(Webscraper):
 
         urls = [url]
 
-        scraper = Webscraper(num_concurrent_wins)
+        scraper = Webscraper(num_concurrent_wins, log_callback=log)
         urls_to_htmls = asyncio.run(scraper.get_htmls(urls))
-        links = cls.get_links(urls_to_htmls)
+        links = cls.get_links(urls_to_htmls, log_callback=log)
 
         with open(outfile, mode="w", encoding="utf-8") as file:
             file.write(f"URL,Title\n")
@@ -274,18 +324,37 @@ class GoogleFilterWebscraper(Webscraper):
 # GUI
 # ===============================================================================
 
+
+class ScraperWorker(QObject):
+    log_signal = Signal(str)
+    finished_signal = Signal()
+
+    def __init__(self, scraper_cls, log_callback=None, **kwargs):
+        super().__init__()
+        self.scraper_cls = scraper_cls
+        self.log_callback = log_callback
+        self.kwargs = kwargs
+
+    def run(self):
+        log = self.log_callback or (lambda msg: self.log_signal.emit(msg))
+        self.scraper_cls.run(log_callback=log, **self.kwargs)
+        self.finished_signal.emit()
+
+
 class LoggerWidget(QWidget):
     def __init__(self):
         super().__init__()
 
-        text = QPlainTextEdit()
-        text.setReadOnly(True)
-        text.insertPlainText("hello world")
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(text)
+        layout.addWidget(self.text)
         self.setLayout(layout)
+
+    def log(self, message: str):
+        self.text.appendPlainText(message)
 
 class FileSelectorWidget(QWidget):
     def __init__(self):
@@ -347,6 +416,8 @@ class AxsSeriesWebscraperWidget(QWidget):
         super().__init__()
 
         self.is_running = False
+        self.worker_thread = None
+        self.worker = None
 
         # Widgets
         self.start_id_line_edit = QLineEdit(self)
@@ -395,37 +466,47 @@ class AxsSeriesWebscraperWidget(QWidget):
     def outfile(self):
         return self.outfile_widget.line_edit.text()
 
+    def _on_finished(self):
+        elapsed = time.time() - self.start_time
+        self.logger_widget.log("\nFinished scrape")
+        self.logger_widget.log(f"Time elapsed: {elapsed:.2f}s")
+        self.is_running = False
+        if self.worker_thread:
+            self.worker_thread.quit()
+            self.worker_thread.wait()
+            self.worker_thread = None
+            self.worker = None
+
     def run(self):
         if self.start_id == -1:
-            print("Need to provide a start_id")
+            self.logger_widget.log("Need to provide a start_id")
             return
 
         if self.stop_id == -1:
-            print("Need to provide a stop_id")
+            self.logger_widget.log("Need to provide a stop_id")
             return
 
         if not self.is_running:
             self.is_running = True
+            self.start_time = time.time()
 
-            # ----- Benchmark start ----- #
-            start_time = time.time()
+            self.logger_widget.log("\nStarting scrape:\n")
 
-            print("\nStarting scrape:\n")
-
-            AxsSeriesWebscraper.run(
-                self.start_id, self.stop_id, self.outfile, self.concurrent_windows
+            self.worker_thread = QThread()
+            self.worker = ScraperWorker(
+                AxsSeriesWebscraper,
+                start_id=self.start_id,
+                stop_id=self.stop_id,
+                outfile=self.outfile,
+                num_concurrent_wins=self.concurrent_windows,
             )
-
-            print("\nFinished scrape")
-
-            print(
-                f"Time elapsed: {time.time() - start_time:.2f}s"
-            )
-            # ----- Benchmark stop ----- #
-
-            self.is_running = False
+            self.worker.moveToThread(self.worker_thread)
+            self.worker.log_signal.connect(self.logger_widget.log)
+            self.worker.finished_signal.connect(self._on_finished)
+            self.worker_thread.started.connect(self.worker.run)
+            self.worker_thread.start()
         else:
-            print("\nScrape already in progress\n")
+            self.logger_widget.log("\nScrape already in progress\n")
 
 
 class GoogleFilterWebscraperWidget(QWidget):
@@ -433,12 +514,15 @@ class GoogleFilterWebscraperWidget(QWidget):
         super().__init__()
 
         self.is_running = False
+        self.worker_thread = None
+        self.worker = None
 
         self.keywords_line_edit = QLineEdit(self)
         self.oldest_date_edit = DateSelectorWidget()
         self.concurrent_windows_spin_box = QSpinBox(self)
         self.outfile_widget = FileSelectorWidget()
         self.run_push_button = QPushButton("Run", self)
+        self.logger_widget = LoggerWidget()
 
         self.keywords_line_edit.setText("CODE,PROMO")
         self.concurrent_windows_spin_box.setMinimum(1)
@@ -456,7 +540,7 @@ class GoogleFilterWebscraperWidget(QWidget):
         main_layout = QVBoxLayout()
         main_layout.addLayout(form_layout)
         main_layout.addWidget(self.run_push_button)
-        main_layout.addWidget(LoggerWidget())
+        main_layout.addWidget(self.logger_widget)
         self.setLayout(main_layout)
 
     @property
@@ -475,27 +559,39 @@ class GoogleFilterWebscraperWidget(QWidget):
     def outfile(self):
         return self.outfile_widget.line_edit.text()
 
+    def _on_finished(self):
+        elapsed = time.time() - self.start_time
+        self.logger_widget.log("\nFinished scrape")
+        self.logger_widget.log(f"Time elapsed: {elapsed:.2f}s")
+        self.is_running = False
+        if self.worker_thread:
+            self.worker_thread.quit()
+            self.worker_thread.wait()
+            self.worker_thread = None
+            self.worker = None
+
     def run(self):
         if not self.is_running:
             self.is_running = True
+            self.start_time = time.time()
 
-            # ----- Benchmark start ----- #
-            start_time = time.time()
+            self.logger_widget.log("\nStarting scrape:\n")
 
-            print("\nStarting scrape:\n")
-
-            GoogleFilterWebscraper.run(self.keywords, self.after_date, self.outfile, self.concurrent_windows)
-
-            print("\nFinished scrape")
-
-            print(
-                f"Time elapsed: {time.time() - start_time:.2f}s"
+            self.worker_thread = QThread()
+            self.worker = ScraperWorker(
+                GoogleFilterWebscraper,
+                keywords=self.keywords,
+                after=self.after_date,
+                outfile=self.outfile,
+                num_concurrent_wins=self.concurrent_windows,
             )
-            # ----- Benchmark stop ----- #
-
-            self.is_running = False
+            self.worker.moveToThread(self.worker_thread)
+            self.worker.log_signal.connect(self.logger_widget.log)
+            self.worker.finished_signal.connect(self._on_finished)
+            self.worker_thread.started.connect(self.worker.run)
+            self.worker_thread.start()
         else:
-            print("\nScrape already in progress\n")
+            self.logger_widget.log("\nScrape already in progress\n")
 
 
 class MainWindow(QMainWindow):
@@ -528,11 +624,59 @@ class MainWindow(QMainWindow):
         self.sidebar.setCurrentRow(0)  # default page
 
 
+async def test_stealth():
+    """Launch browser and navigate to bot.sannysoft.com for inspection."""
+    stealth_script = """
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined
+        });
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5]
+        });
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en']
+        });
+    """
+    playwright = await async_playwright().start()
+    browser = await playwright.chromium.launch(headless=False)
+    context = await browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        ),
+        locale="en-US",
+        timezone_id="America/New_York",
+        viewport={"width": 1920, "height": 1080},
+    )
+    await context.add_init_script(stealth_script)
+    page = await context.new_page()
+
+    print("Navigating to bot.sannysoft.com...")
+    await page.goto("https://bot.sannysoft.com/")
+    print("Page loaded. Opening Playwright inspector for inspection...")
+    await page.pause()
+
+    await browser.close()
+    await playwright.stop()
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="AXS Webscraper")
+    parser.add_argument("--test-stealth", action="store_true",
+                        help="Test browser stealth on bot.sannysoft.com and pause for inspection")
+    return parser.parse_args()
+
+
 def main():
-    app = QApplication([])
-    window = MainWindow()
-    window.show()
-    app.exec()
+    args = parse_args()
+
+    if args.test_stealth:
+        asyncio.run(test_stealth())
+    else:
+        app = QApplication([])
+        window = MainWindow()
+        window.show()
+        app.exec()
 
 
 if __name__ == "__main__":
