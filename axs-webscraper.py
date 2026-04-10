@@ -125,15 +125,23 @@ class Webscraper:
                 "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
             )
             stealth_script = """
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5]
-                });
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en']
-                });
+                (function() {
+                    function createPluginArray() {
+                        var plugins = [
+                            { name: 'Chrome PDF Plugin', description: 'Portable Document Format', filename: 'internal-pdf-viewer', length: 0 },
+                            { name: 'Chrome PDF Viewer', description: '', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', length: 1 },
+                            { name: 'Native Client', description: '', filename: 'internal-nacl-plugin', length: 2 }
+                        ];
+                        plugins.length = 3;
+                        plugins.item = function(i) { return this[i] || null; };
+                        plugins.namedItem = function(name) { return null; };
+                        plugins.refresh = function() {};
+                        return plugins;
+                    }
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                    Object.defineProperty(navigator, 'plugins', { get: () => createPluginArray() });
+                    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                })();
             """
             context = await browser.new_context(
                 user_agent=user_agent,
@@ -142,8 +150,8 @@ class Webscraper:
                 viewport={"width": 1920, "height": 1080},
                 permissions=["geolocation"],
             )
-            await context.add_init_script(stealth_script)
             page = await context.new_page()
+            await page.add_init_script(stealth_script)
             try:
                 self.log_callback(f"sending request to {url}")
                 await page.goto(url)
@@ -627,15 +635,23 @@ class MainWindow(QMainWindow):
 async def test_stealth():
     """Launch browser and navigate to bot.sannysoft.com for inspection."""
     stealth_script = """
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined
-        });
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5]
-        });
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en']
-        });
+        (function() {
+            function createPluginArray() {
+                var plugins = [
+                    { name: 'Chrome PDF Plugin', description: 'Portable Document Format', filename: 'internal-pdf-viewer', length: 0 },
+                    { name: 'Chrome PDF Viewer', description: '', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', length: 1 },
+                    { name: 'Native Client', description: '', filename: 'internal-nacl-plugin', length: 2 }
+                ];
+                plugins.length = 3;
+                plugins.item = function(i) { return this[i] || null; };
+                plugins.namedItem = function(name) { return null; };
+                plugins.refresh = function() {};
+                return plugins;
+            }
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => createPluginArray() });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        })();
     """
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(headless=False)
@@ -648,8 +664,8 @@ async def test_stealth():
         timezone_id="America/New_York",
         viewport={"width": 1920, "height": 1080},
     )
-    await context.add_init_script(stealth_script)
     page = await context.new_page()
+    await page.add_init_script(stealth_script)
 
     print("Navigating to bot.sannysoft.com...")
     await page.goto("https://bot.sannysoft.com/")
