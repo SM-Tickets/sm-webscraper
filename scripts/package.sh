@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
-# echo "$(realpath $0)"
-required_path="$(dirname "$(dirname "$(realpath $0)")")"
+required_path="$(dirname "$(dirname "$(realpath "$0")")")"
 
 if [ "$PWD" != "$required_path" ]; then
     echo ERROR: Script must be run from "$required_path" 1>&2
@@ -13,31 +12,23 @@ if [ ! -d ./dist ]; then
     exit 1
 fi
 
-if [ -d ./package ]; then
-    rm -rf ./package
-fi
-mkdir package
-
 if [ "$(uname -o)" = "Msys" ]; then
     cp dist/axs-webscraper.exe .
-    zip -r axs-webscraper_win_x86-64.zip axs-webscraper.exe browser_drivers/;
+    zip -r dist/axs-webscraper_win_x86-64.zip axs-webscraper.exe browser_drivers/;
     rm axs-webscraper.exe
-    cp dist/axs-webscraper.exe axs-webscraper-core_win_x86-64.exe
-    mv axs-webscraper_win_x86-64.zip axs-webscraper-core_win_x86-64.exe package
+    cp dist/axs-webscraper.exe dist/axs-webscraper-core_win_x86-64.exe
 elif [ "$(uname -o)" = "Darwin" ]; then
     if [ "$(uname -m)" = "x86_64" ]; then
         cp -a dist/axs-webscraper dist/axs-webscraper.app .
-        tar czvf axs-webscraper_macos_x86-64.tar.gz axs-webscraper axs-webscraper.app browser_drivers/;
+        tar czvf dist/axs-webscraper_macos_x86-64.tar.gz axs-webscraper axs-webscraper.app browser_drivers/;
         rm -rf axs-webscraper axs-webscraper.app
-        cp dist/axs-webscraper axs-webscraper-core_macos_x86-64
-        cp -a dist/axs-webscraper.app axs-webscraper-core_macos_x86-64.app
-        mv axs-webscraper_macos_x86-64.tar.gz axs-webscraper-core_macos_x86-64 axs-webscraper-core_macos_x86-64.app package
+        cp dist/axs-webscraper dist/axs-webscraper-core_macos_x86-64
+        cp -a dist/axs-webscraper.app dist/axs-webscraper-core_macos_x86-64.app
     elif [ "$(uname -m)" = "arm64" ]; then
         cp -a dist/axs-webscraper dist/axs-webscraper.app .
-        tar czvf axs-webscraper_macos_arm64.tar.gz axs-webscraper axs-webscraper.app browser_drivers/;
+        tar czvf dist/axs-webscraper_macos_arm64.tar.gz axs-webscraper axs-webscraper.app browser_drivers/;
         rm -rf axs-webscraper axs-webscraper.app
-        cp dist/axs-webscraper axs-webscraper-core_macos_arm64
-        cp -a dist/axs-webscraper.app axs-webscraper-core_macos_arm64.app
-        mv axs-webscraper_macos_arm64.tar.gz axs-webscraper-core_macos_arm64 axs-webscraper-core_macos_arm64.app package
+        cp dist/axs-webscraper dist/axs-webscraper-core_macos_arm64
+        cp -a dist/axs-webscraper.app dist/axs-webscraper-core_macos_arm64.app
     fi
 fi
