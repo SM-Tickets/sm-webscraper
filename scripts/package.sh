@@ -25,9 +25,9 @@ elif [ "$(uname -o)" = "Darwin" ]; then
         cp dist/axs-webscraper dist/axs-webscraper-core_macos_x86-64
         cp -a dist/axs-webscraper.app dist/axs-webscraper-core_macos_x86-64.app
     elif [ "$(uname -m)" = "arm64" ]; then
-        cp -a dist/axs-webscraper dist/axs-webscraper.app .
+        cp -a dist/axs-webscraper dist/axs-webscraper.app scripts/macos/sanitize .
         tar czvf dist/axs-webscraper_macos_arm64.tar.gz axs-webscraper axs-webscraper.app browser_drivers/;
-        rm -rf axs-webscraper axs-webscraper.app
+        rm -rf axs-webscraper axs-webscraper.app sanitize
         cp dist/axs-webscraper dist/axs-webscraper-core_macos_arm64
         cp -a dist/axs-webscraper.app dist/axs-webscraper-core_macos_arm64.app
     fi
