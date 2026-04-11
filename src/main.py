@@ -276,20 +276,39 @@ class AxsSeriesWebscraper(Webscraper):
 class GoogleFilterWebscraper(Webscraper):
 
     @classmethod
-    def get_links(cls, urls_to_htmls: dict[str, str], log_callback=None):
-        all_links = []
+    def parse(cls, urls_to_htmls: dict[str, str], log_callback=None):
+        result = []
         log = log_callback or print
 
         log("Parsing responses...")
         for url, html in urls_to_htmls.items():
             html = BeautifulSoup(html, "html.parser")
-            links = (
-                html.find_all("a", class_="zReHs")
-            )
-            if len(links) > 0:
-                all_links.extend([link["href"] for link in links])
+            containers = html.find_all("div", class_="N54PNb BToiNc")
 
-        return all_links
+            for container in containers:
+                # Find the <a> tag
+                link_tag = container.find("a", class_="zReHs")
+                link = link_tag["href"] if link_tag else None
+
+                h3_tag = link_tag.find("h3")
+                title = h3_tag.get_text(strip=True).replace(",", "") if h3_tag else None
+
+                # Find the span containing date
+                span_tag = container.find("span", class_="YrbPuc")
+                date = span_tag.find("span").get_text(strip=True).replace(",", "") if span_tag else None
+
+                # Find the span containing desc
+                desc_tag = span_tag.find_next_sibling("span") if span_tag else None
+                desc = desc_tag.get_text(strip=True).replace(",", "") if desc_tag else None
+
+                result.append({
+                    "title": title,
+                    "link": link,
+                    "date": date,
+                    "desc": desc
+                })
+
+        return result
 
     @classmethod
     def get_pages(cls, first_page_html):
@@ -330,16 +349,16 @@ class GoogleFilterWebscraper(Webscraper):
         pages = cls.get_pages(urls_to_htmls[url])
         urls_to_htmls.update(asyncio.run(scraper.get_htmls(pages)))
 
-        links = cls.get_links(urls_to_htmls, log_callback=log)
+        data = cls.parse(urls_to_htmls, log_callback=log)
 
         dirname = os.path.dirname(outfile)
         if dirname != "" and not os.path.exists(dirname):
             os.makedirs(dirname)
 
         with open(outfile, mode="w", encoding="utf-8") as file:
-            file.write(f"URL,Title\n")
-            for link in links:
-                file.write(f"{link}\n")
+            file.write(f"Title,URL,Date,Description\n")
+            for d in data:
+                file.write(f"{d["title"]},{d["link"]},{d["date"]},{d["desc"]}\n")
 
 
 # ===============================================================================
