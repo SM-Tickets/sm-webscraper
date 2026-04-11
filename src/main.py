@@ -7,10 +7,6 @@ import argparse
 import threading
 from abc import abstractmethod
 
-import tkinter as tk
-from tkinter import filedialog
-from PIL import Image, ImageTk
-
 from PySide6.QtCore import Qt, QDate, Signal, QObject, QThread
 from PySide6.QtWidgets import (
     QApplication,

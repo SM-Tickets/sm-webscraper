@@ -61,6 +61,11 @@
           pkgs.cairo
           pkgs.eudev
           pkgs.alsa-lib
+
+          pkgs.krb5
+          pkgs.brotli
+
+          pkgs.zlib
           # ... <- add nix packages with depended-on dynamic libraries here
         ];
 
