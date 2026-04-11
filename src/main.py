@@ -292,6 +292,13 @@ class GoogleFilterWebscraper(Webscraper):
         return all_links
 
     @classmethod
+    def get_pages(cls, first_page_html):
+        html = BeautifulSoup(first_page_html, "html.parser")
+        anchors = html.find_all("a", class_="fl")
+        hrefs = ["https://www.google.com" + anchor["href"] for anchor in anchors]
+        return hrefs
+
+    @classmethod
     def generate_outfile(cls):
         now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         return os.path.join(
@@ -315,8 +322,19 @@ class GoogleFilterWebscraper(Webscraper):
         urls = [url]
 
         scraper = Webscraper(num_concurrent_wins, log_callback=log)
+
+        # scrape first page
         urls_to_htmls = asyncio.run(scraper.get_htmls(urls))
+
+        # scrape other pages
+        pages = cls.get_pages(urls_to_htmls[url])
+        urls_to_htmls.update(asyncio.run(scraper.get_htmls(pages)))
+
         links = cls.get_links(urls_to_htmls, log_callback=log)
+
+        dirname = os.path.dirname(outfile)
+        if dirname != "" and not os.path.exists(dirname):
+            os.makedirs(dirname)
 
         with open(outfile, mode="w", encoding="utf-8") as file:
             file.write(f"URL,Title\n")
