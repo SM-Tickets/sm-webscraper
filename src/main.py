@@ -3,6 +3,7 @@ import sys
 import time
 import datetime
 import random
+import re
 import argparse
 import threading
 from abc import abstractmethod
@@ -276,6 +277,10 @@ class AxsSeriesWebscraper(Webscraper):
 class GoogleFilterWebscraper(Webscraper):
 
     @classmethod
+    def get_axs_event_title(cls, event_url):
+        ...
+
+    @classmethod
     def parse(cls, urls_to_htmls: dict[str, str], log_callback=None):
         result = []
         log = log_callback or print
@@ -332,10 +337,11 @@ class GoogleFilterWebscraper(Webscraper):
         if outfile == "":
             outfile = cls.generate_outfile()
 
-        keywords = [ f'"{keyword}"' for keyword in keywords ]
+        keywords = [ f'"{re.sub(r"\s+", "+", keyword)}"' for keyword in keywords ]
+
         # construct query
-        url = "https://www.google.com/search?q=site:www.axs.com"
-        url += "+" + "+".join(keywords)
+        url = "https://www.google.com/search?q=site:www.axs.com/events"
+        url += "+" + "+OR+".join(keywords)
         url += f"+after:{after}"
 
         urls = [url]
@@ -351,14 +357,17 @@ class GoogleFilterWebscraper(Webscraper):
 
         data = cls.parse(urls_to_htmls, log_callback=log)
 
+        for d in data:
+            d["event_title"] = cls.get_axs_event_title(d["link"])
+
         dirname = os.path.dirname(outfile)
         if dirname != "" and not os.path.exists(dirname):
             os.makedirs(dirname)
 
         with open(outfile, mode="w", encoding="utf-8") as file:
-            file.write(f"Title,URL,Date,Description\n")
+            file.write(f"Event Title,Title,URL,Date,Description\n")
             for d in data:
-                file.write(f"{d["title"]},{d["link"]},{d["date"]},{d["desc"]}\n")
+                file.write(f"{d["event_title"]},{d["title"]},{d["link"]},{d["date"]},{d["desc"]}\n")
 
 
 # ===============================================================================
@@ -565,7 +574,7 @@ class GoogleFilterWebscraperWidget(QWidget):
         self.run_push_button = QPushButton("Run", self)
         self.logger_widget = LoggerWidget()
 
-        self.keywords_line_edit.setText("CODE,PROMO")
+        self.keywords_line_edit.setText("4 Pack,Promo,Crew Pack,Flash,Anniversary,BOGO,2 Pack,2 for 1,Discount")
         self.concurrent_windows_spin_box.setMinimum(1)
         self.concurrent_windows_spin_box.setMaximum(NUM_CORES)
         self.concurrent_windows_spin_box.setValue(NUM_CORES)
