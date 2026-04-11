@@ -704,6 +704,7 @@ def main():
         asyncio.run(test_stealth())
     else:
         app = QApplication([])
+        app.setStyle("Fusion")
         window = MainWindow()
         window.show()
         app.exec()
