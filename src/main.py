@@ -26,14 +26,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFileIconProvider,
     QDateEdit,
-    QSizePolicy
+    QSizePolicy,
 )
 
 import asyncio
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
-DEBUG = False
+DEBUG = True
 NUM_CORES = os.cpu_count() or 1
 
 # ===============================================================================
@@ -207,7 +207,6 @@ class Webscraper:
 
 
 class AxsSeriesWebscraper(Webscraper):
-
     @classmethod
     def get_titles(cls, urls_to_htmls: dict[str, str], log_callback=None):
         """Parse the html for the title of the series
@@ -245,7 +244,14 @@ class AxsSeriesWebscraper(Webscraper):
         )
 
     @classmethod
-    def run(cls, start_id: int, stop_id: int, outfile: str, num_concurrent_wins: int, log_callback=None):
+    def run(
+        cls,
+        start_id: int,
+        stop_id: int,
+        outfile: str,
+        num_concurrent_wins: int,
+        log_callback=None,
+    ):
         log = log_callback or print
         if outfile == "":
             outfile = cls.generate_outfile(start_id, stop_id)
@@ -275,52 +281,44 @@ class AxsSeriesWebscraper(Webscraper):
 
 
 class GoogleFilterWebscraper(Webscraper):
-
     @classmethod
-    def get_axs_event_title(cls, event_url):
-        ...
-
-    @classmethod
-    def parse(cls, urls_to_htmls: dict[str, str], log_callback=None):
-        result = []
+    def get_axs_event_title(cls, event_html, log_callback):
         log = log_callback or print
 
-        log("Parsing responses...")
-        for url, html in urls_to_htmls.items():
-            html = BeautifulSoup(html, "html.parser")
-            containers = html.find_all("div", class_="N54PNb BToiNc")
+        soup = BeautifulSoup(event_html, "html.parser")
+        h1_tag = (
+            soup.find("h1", class_="styles__EventTitle-sc-768cdea1-7 eNioSo")
+        )
+        title = h1_tag.get_text(strip=True).replace(",", "") if h1_tag else None
 
-            for container in containers:
-                # Find the <a> tag
-                link_tag = container.find("a", class_="zReHs")
-                link = link_tag["href"] if link_tag else None
-
-                h3_tag = link_tag.find("h3")
-                title = h3_tag.get_text(strip=True).replace(",", "") if h3_tag else None
-
-                # Find the span containing date
-                span_tag = container.find("span", class_="YrbPuc")
-                date = span_tag.find("span").get_text(strip=True).replace(",", "") if span_tag else None
-
-                # Find the span containing desc
-                desc_tag = span_tag.find_next_sibling("span") if span_tag else None
-                desc = desc_tag.get_text(strip=True).replace(",", "") if desc_tag else None
-
-                result.append({
-                    "title": title,
-                    "link": link,
-                    "date": date,
-                    "desc": desc
-                })
-
-        return result
+        return title
 
     @classmethod
-    def get_pages(cls, first_page_html):
-        html = BeautifulSoup(first_page_html, "html.parser")
-        anchors = html.find_all("a", class_="fl")
-        hrefs = ["https://www.google.com" + anchor["href"] for anchor in anchors]
-        return hrefs
+    def parse_page(cls, html: str) -> dict:
+        result = {}
+        soup = BeautifulSoup(html, "html.parser")
+        containers = soup.find_all("div", class_="N54PNb BToiNc")
+
+        for container in containers:
+            link_tag = container.find("a", class_="zReHs")
+            link = link_tag["href"] if link_tag else None
+
+            h3_tag = link_tag.find("h3")
+            title = h3_tag.get_text(strip=True).replace(",", "") if h3_tag else None
+
+            span_tag = container.find("span", class_="YrbPuc")
+            date = (
+                span_tag.find("span").get_text(strip=True).replace(",", "")
+                if span_tag
+                else None
+            )
+
+            desc_tag = span_tag.find_next_sibling("span") if span_tag else None
+            desc = desc_tag.get_text(strip=True).replace(",", "") if desc_tag else None
+
+            result[link] = {"title": title, "date": date, "desc": desc}
+
+        return result
 
     @classmethod
     def generate_outfile(cls):
@@ -332,33 +330,50 @@ class GoogleFilterWebscraper(Webscraper):
         )
 
     @classmethod
-    def run(cls, keywords: list[str], after: str, outfile: str, num_concurrent_wins: int, log_callback=None):
+    def run(
+        cls,
+        keywords: list[str],
+        after: str,
+        outfile: str,
+        num_concurrent_wins: int,
+        log_callback=None,
+    ):
         log = log_callback or print
         if outfile == "":
             outfile = cls.generate_outfile()
 
-        keywords = [ f'"{re.sub(r"\s+", "+", keyword)}"' for keyword in keywords ]
+        keywords = [f'"{re.sub(r"\s+", "+", keyword)}"' for keyword in keywords]
 
         # construct query
         url = "https://www.google.com/search?q=site:www.axs.com/events"
         url += "+" + "+OR+".join(keywords)
         url += f"+after:{after}"
 
-        urls = [url]
-
         scraper = Webscraper(num_concurrent_wins, log_callback=log)
 
-        # scrape first page
-        urls_to_htmls = asyncio.run(scraper.get_htmls(urls))
+        # fetch all pages using start parameter pagination
+        event_urls_to_info = {}
+        start = 0
+        log(f"Fetching results starting from page 0...")
 
-        # scrape other pages
-        pages = cls.get_pages(urls_to_htmls[url])
-        urls_to_htmls.update(asyncio.run(scraper.get_htmls(pages)))
+        while True:
+            page_url = f"{url}&start={start}"
+            page_url_to_html = asyncio.run(scraper.get_htmls([page_url]))
+            page_html = page_url_to_html[page_url]
 
-        data = cls.parse(urls_to_htmls, log_callback=log)
+            page_urls_to_info = cls.parse_page(page_html)
 
-        for d in data:
-            d["event_title"] = cls.get_axs_event_title(d["link"])
+            if not page_urls_to_info:
+                log(f"No more results at start={start}. Stopping.")
+                break
+
+            event_urls_to_info.update(page_urls_to_info)
+            log(f"Fetched page (start={start}) with {len(page_urls_to_info)} results")
+            start += 10
+
+        event_urls_to_htmls = asyncio.run(scraper.get_htmls(event_urls_to_info.keys()))
+        for url, html in event_urls_to_htmls.items():
+            event_urls_to_info[url]["event_title"] = cls.get_axs_event_title(html, log_callback)
 
         dirname = os.path.dirname(outfile)
         if dirname != "" and not os.path.exists(dirname):
@@ -366,8 +381,10 @@ class GoogleFilterWebscraper(Webscraper):
 
         with open(outfile, mode="w", encoding="utf-8") as file:
             file.write(f"Event Title,Title,URL,Date,Description\n")
-            for d in data:
-                file.write(f"{d["event_title"]},{d["title"]},{d["link"]},{d["date"]},{d["desc"]}\n")
+            for url, info in event_urls_to_info.items():
+                file.write(
+                    f"{info['event_title']},{info['title']},{url},{info['date']},{info['desc']}\n"
+                )
 
 
 # ===============================================================================
@@ -406,6 +423,7 @@ class LoggerWidget(QWidget):
     def log(self, message: str):
         self.text.appendPlainText(message)
 
+
 class FileSelectorWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -413,7 +431,9 @@ class FileSelectorWidget(QWidget):
         provider = QFileIconProvider()
 
         self.line_edit = QLineEdit(self)
-        self.push_button = QPushButton(provider.icon(QFileIconProvider.IconType.File), "", self)
+        self.push_button = QPushButton(
+            provider.icon(QFileIconProvider.IconType.File), "", self
+        )
         self.push_button.clicked.connect(self.select)
 
         layout = QHBoxLayout()
@@ -427,6 +447,7 @@ class FileSelectorWidget(QWidget):
         if selected:
             self.line_edit.setText(selected)
 
+
 class DateSelectorWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -438,17 +459,37 @@ class DateSelectorWidget(QWidget):
         self.day_inc_push_button = QPushButton("+1d", self)
         self.day_dec_push_button = QPushButton("-1d", self)
 
-        self.today_push_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.month_inc_push_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.month_dec_push_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.day_inc_push_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.day_dec_push_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.today_push_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.month_inc_push_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.month_dec_push_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.day_inc_push_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.day_dec_push_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
 
-        self.today_push_button.pressed.connect(lambda: self.date_edit.setDate(QDate.currentDate()))
-        self.month_inc_push_button.pressed.connect(lambda: self.date_edit.setDate(self.date_edit.date().addMonths(1)))
-        self.month_dec_push_button.pressed.connect(lambda: self.date_edit.setDate(self.date_edit.date().addMonths(-1)))
-        self.day_inc_push_button.pressed.connect(lambda: self.date_edit.setDate(self.date_edit.date().addDays(1)))
-        self.day_dec_push_button.pressed.connect(lambda: self.date_edit.setDate(self.date_edit.date().addDays(-1)))
+        self.today_push_button.pressed.connect(
+            lambda: self.date_edit.setDate(QDate.currentDate())
+        )
+        self.month_inc_push_button.pressed.connect(
+            lambda: self.date_edit.setDate(self.date_edit.date().addMonths(1))
+        )
+        self.month_dec_push_button.pressed.connect(
+            lambda: self.date_edit.setDate(self.date_edit.date().addMonths(-1))
+        )
+        self.day_inc_push_button.pressed.connect(
+            lambda: self.date_edit.setDate(self.date_edit.date().addDays(1))
+        )
+        self.day_dec_push_button.pressed.connect(
+            lambda: self.date_edit.setDate(self.date_edit.date().addDays(-1))
+        )
 
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -574,7 +615,9 @@ class GoogleFilterWebscraperWidget(QWidget):
         self.run_push_button = QPushButton("Run", self)
         self.logger_widget = LoggerWidget()
 
-        self.keywords_line_edit.setText("4 Pack,Promo,Crew Pack,Flash,Anniversary,BOGO,2 Pack,2 for 1,Discount")
+        self.keywords_line_edit.setText(
+            "4 Pack,Promo,Crew Pack,Flash,Anniversary,BOGO,2 Pack,2 for 1,Discount"
+        )
         self.concurrent_windows_spin_box.setMinimum(1)
         self.concurrent_windows_spin_box.setMaximum(NUM_CORES)
         self.concurrent_windows_spin_box.setValue(NUM_CORES)
@@ -706,6 +749,7 @@ async def test_stealth():
         timezone_id="America/New_York",
         viewport={"width": 1920, "height": 1080},
     )
+    context.add_init_script(stealth_script)
     page = await context.new_page()
     await page.add_init_script(stealth_script)
 
@@ -720,8 +764,11 @@ async def test_stealth():
 
 def parse_args():
     parser = argparse.ArgumentParser(description="AXS Webscraper")
-    parser.add_argument("--test-stealth", action="store_true",
-                        help="Test browser stealth on bot.sannysoft.com and pause for inspection")
+    parser.add_argument(
+        "--test-stealth",
+        action="store_true",
+        help="Test browser stealth on bot.sannysoft.com and pause for inspection",
+    )
     return parser.parse_args()
 
 
