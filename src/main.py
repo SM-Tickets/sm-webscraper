@@ -1,12 +1,11 @@
 import os
+import csv
 import sys
 import time
 import datetime
 import random
 import re
 import argparse
-import threading
-from abc import abstractmethod
 
 from PySide6.QtCore import Qt, QDate, Signal, QObject, QThread
 from PySide6.QtWidgets import (
@@ -30,10 +29,11 @@ from PySide6.QtWidgets import (
 )
 
 import asyncio
-from playwright.async_api import async_playwright
-from bs4 import BeautifulSoup
+from scrapling.fetchers import AsyncStealthySession
+from scrapling.engines.toolbelt.custom import Response
+from plyer import notification
 
-DEBUG = True
+DEBUG = False
 NUM_CORES = os.cpu_count() or 1
 
 # ===============================================================================
@@ -53,7 +53,7 @@ def get_application_path():
             return os.path.dirname(sys.executable)
     # if invoked via python
     else:
-        return os.path.dirname(__file__)
+        return os.path.dirname(os.path.dirname(__file__))
 
 
 if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
@@ -69,170 +69,124 @@ print(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
 
 
 class Webscraper:
-    def __init__(self, num_concurrent_wins, log_callback=None):
-        self.semaphore = asyncio.Semaphore(int(num_concurrent_wins))
-        self.failed_connections = []
-        self.log_callback = log_callback or print
+    def __init__(self, num_concurrent_wins=NUM_CORES, log_callback=None):
+        self.num_concurrent_wins = num_concurrent_wins
+        self.failed_conn_urls = []
+        self.log = log_callback or print
 
-    @staticmethod
-    def _get_browser_args():
-        return [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-accelerated-2d-canvas",
-            "--no-first-run",
-            "--no-zygote",
-            "--disable-gpu",
-        ]
+    async def _get_response(self, url: str, session: AsyncStealthySession) -> Response|None:
+        try:
+            self.log(f"sending request to {url}")
+            response = await session.fetch(url)
+            self.log(f"received response from {url}")
 
-    async def _start_browser(self):
-        playwright = await async_playwright().start()
-        if DEBUG:
-            browser = await playwright.chromium.launch(
-                headless=False,
-                slow_mo=10000,
-                args=self._get_browser_args(),
-            )
-        else:
-            browser = await playwright.chromium.launch(
-                headless=True,
-                args=self._get_browser_args(),
-            )
-        return browser, playwright
+            if url in self.failed_conn_urls:
+                self.failed_conn_urls.remove(url)
 
-    async def _close_browser(self, playwright, browser):
-        await browser.close()
-        await playwright.stop()
+            if self._is_captcha_page(response):
+                self.log("Response contains captcha. Requiring manual captcha solution.")
+                notification.notify(title="Webscraper", message="Manual CAPTCHA solution required", app_name="Webscraper")
+                response, captcha_cookies = await self.manually_solve_captcha(url)
+                await session.context.add_cookies(captcha_cookies)
 
-    async def _get_html(self, url, browser):
-        """Get html for a url
+            return response
 
-        Args:
-          url (str): url to be requested
+        except Exception as err:
+            self.log(f"error for {url}:")
+            self.log(str(err))
+            self.failed_conn_urls.append(url)
+            return None
 
-        Returns:
-            dict{str: str}: Mapping of url to raw html
-        """
-        async with self.semaphore:
-            user_agent = (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
-            )
-            stealth_script = """
-                (function() {
-                    function createPluginArray() {
-                        var plugins = [
-                            { name: 'Chrome PDF Plugin', description: 'Portable Document Format', filename: 'internal-pdf-viewer', length: 0 },
-                            { name: 'Chrome PDF Viewer', description: '', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', length: 1 },
-                            { name: 'Native Client', description: '', filename: 'internal-nacl-plugin', length: 2 }
-                        ];
-                        plugins.length = 3;
-                        plugins.item = function(i) { return this[i] || null; };
-                        plugins.namedItem = function(name) { return null; };
-                        plugins.refresh = function() {};
-                        return plugins;
-                    }
-                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                    Object.defineProperty(navigator, 'plugins', { get: () => createPluginArray() });
-                    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                })();
-            """
-            context = await browser.new_context(
-                user_agent=user_agent,
-                locale="en-US",
-                timezone_id="America/New_York",
-                viewport={"width": 1920, "height": 1080},
-                permissions=["geolocation"],
-            )
-            page = await context.new_page()
-            await page.add_init_script(stealth_script)
-            try:
-                self.log_callback(f"sending request to {url}")
-                await page.goto(url)
-                if DEBUG:
-                    await page.pause()
-
-            except Exception as err:
-                self.log_callback(f"error for {url}:")
-                self.log_callback(str(err))
-                self.failed_connections.append(url)
-                await page.close()
-                return {url: ""}
-
-            self.log_callback(f"received response from {url}")
-
-            if url in self.failed_connections:
-                self.failed_connections.remove(url)
-            html = await page.content()
-            await context.close()
-
-            await asyncio.sleep(random.uniform(1, 3))
-
-        return {url: html}
-
-    async def get_htmls(self, urls):
-        """Get html for urls
-
-        Returns:
-            dict{str: BeautifulSoup.BeautifulSoup}: Mapping of urls to BeautifulSoup objects representing the url's corresponding HTML
-        """
-
-        browser, playwright = await self._start_browser()
-
-        coros = [self._get_html(url, browser) for url in urls]
-
+    async def get_responses(self, urls: list[str], cookies: list[dict] = []) -> tuple[dict[str, Response], list[dict]]:
         # get html of each url
         #   - note that the result is in the same order as the passed-in list of coros
-        urls_to_raw_htmls = await asyncio.gather(*coros)
+        async with AsyncStealthySession(
+            headless=not DEBUG,
+            real_chrome=False,
+            block_webrtc=True,
+            solve_cloudflare=True,
+            timeout=60000,  # 60 seconds for Cloudflare challenges
+            max_pages=self.num_concurrent_wins
+        ) as session:
+            if cookies:
+                await session.context.add_cookies(cookies)
 
-        # retry failed connections up to 10 times
-        for _ in range(10):
-            if len(self.failed_connections) == 0:
-                break
-            self.log_callback(f"\nRetrying failed connections:")
-            coros = [self._get_html(url, browser) for url in self.failed_connections]
-            urls_to_raw_htmls.extend(await asyncio.gather(*coros))
+            coros = [self._get_response(url, session) for url in urls]
+            responses = await asyncio.gather(*coros)
 
-        await self._close_browser(playwright, browser)
+            # retry failed connections up to 10 times
+            url_index_map = {}
+            for _ in range(10):
+                if len(self.failed_conn_urls) == 0:
+                    break
+                if len(url_index_map) == 0:
+                    url_index_map = { urls[i]: i for i in range(len(urls)) }
+                self.log(f"\nRetrying failed connections:")
+                failed_conn_urls = self.failed_conn_urls
+                coros = [self._get_response(url, session) for url in self.failed_conn_urls]
+                retry_responses = await asyncio.gather(*coros)
+                for retry_idx, failed_conn_url in enumerate(failed_conn_urls):
+                    idx = url_index_map[failed_conn_url]
+                    responses[idx] = retry_responses[retry_idx]
 
-        # return {url: BeautifulSoup(html, 'html.parser') for url_to_raw_html in urls_to_raw_htmls for url, html in url_to_raw_html.items()}
-        return {
-            url: html
-            for url_to_raw_html in urls_to_raw_htmls
-            for url, html in url_to_raw_html.items()
-        }
+
+            session_cookies = await session.context.cookies()
+
+        url_to_response = {}
+        for i in range(len(urls)):
+            if responses[i] is not None:
+                url_to_response[urls[i]] = responses[i]
+
+        return url_to_response, session_cookies
+
+    @classmethod
+    def _is_captcha_page(cls, response):
+        return response.find("iframe", title="reCAPTCHA")
+
+    # NOTE: This won't work if the site redirects to a different URL. A better method would be to somehow wait until _is_captcha_page returns False, but that is done within Python, not Javascript.
+    @classmethod
+    def get_wait_for_url_action(cls, url):
+        async def wait_for_url_action(page):
+            # await page.wait_for_function(f"() => console.log(decodeURI(window.location.href))", timeout=0)
+            await page.wait_for_function(f"() => decodeURI(window.location.href).includes('{url}')", timeout=0)
+            await page.wait_for_load_state()
+        return wait_for_url_action
+
+    # TODO: take in kwargs like page_action to pass into fetch call
+    @classmethod
+    async def manually_solve_captcha(cls, url):
+        async with AsyncStealthySession(
+            headless=False,
+            real_chrome=False,
+            block_webrtc=True,
+            solve_cloudflare=True,
+            timeout=60000,  # 60 seconds for Cloudflare challenges
+        ) as session:
+            response = await session.fetch(url, page_action=cls.get_wait_for_url_action(url))
+            with open("output.html", "w") as file:
+                file.write(response.html_content)
+            # await session.fetch(url, wait_selector="h3")
+            cookies = await session.context.cookies()
+
+        return response, cookies
+
 
 
 class AxsSeriesWebscraper(Webscraper):
     @classmethod
-    def get_titles(cls, urls_to_htmls: dict[str, str], log_callback=None):
-        """Parse the html for the title of the series
-
-        Returns:
-            dict{str: str|None}: Mapping of urls to their AXS event titles
-        """
-        titles = {}
+    def get_titles(cls, url_to_response: dict[str, Response], log_callback=None):
+        url_to_title = {}
         log = log_callback or print
 
-        log("Parsing responses...")
-        for url, html in urls_to_htmls.items():
-            html = BeautifulSoup(html, "html.parser")
-            title = (
-                html.find("h1", class_="series-header__main-title")
-                or html.find("div", class_="styles__SeriesName-sc-a987fbc9-2")
-                or html.find("div", class_="styles__SeriesName-sc-7ec0aa62-2")
-                or html.find("h1", class_="styles__SeriesTitle-sc-22d8e9ab-1")
-                or html.find("h1", class_="styles__SeriesTitle-sc-3de48f0c-1")
-                or html.find("h1", class_="styles__SeriesTitle-sc-65abd048-1")
+        log("Parsing for series titles...")
+        for url, response in url_to_response.items():
+            title_tag = (
+                response.find("h1", lambda elem: elem.has_class("styles__SeriesTitle-sc-65abd048-1"))
             )
-            if title:
-                title = title.text.strip()
-            titles[url] = title
+            title = title_tag.get_all_text(strip=True) if title_tag else None
+            url_to_title[url] = title
 
-        return titles
+        return url_to_title
 
     @classmethod
     def generate_outfile(cls, start_id, stop_id):
@@ -262,10 +216,10 @@ class AxsSeriesWebscraper(Webscraper):
 
         # run scraper
         scraper = Webscraper(num_concurrent_wins, log_callback=log)
-        urls_to_htmls = asyncio.run(scraper.get_htmls(urls))
-        urls_to_titles = cls.get_titles(urls_to_htmls, log_callback=log)
+        url_to_response, _ = asyncio.run(scraper.get_responses(urls))
+        url_to_title = cls.get_titles(url_to_response, log_callback=log)
 
-        log(f"\nUnresolved failed connections: {scraper.failed_connections}")
+        log(f"\nUnresolved failed connections: {scraper.failed_conn_urls}")
         log(f"\nSaving results")
 
         dirname = os.path.dirname(outfile)
@@ -274,7 +228,7 @@ class AxsSeriesWebscraper(Webscraper):
 
         with open(outfile, mode="w", encoding="utf-8") as file:
             file.write(f"URL,Title\n")
-            for url, title in urls_to_titles.items():
+            for url, title in url_to_title.items():
                 file.write(f"{url},{title}\n")
 
         log(f"\nResults stored in {outfile}")
@@ -282,41 +236,38 @@ class AxsSeriesWebscraper(Webscraper):
 
 class GoogleFilterWebscraper(Webscraper):
     @classmethod
-    def get_axs_event_title(cls, event_html, log_callback):
-        log = log_callback or print
-
-        soup = BeautifulSoup(event_html, "html.parser")
-        h1_tag = (
-            soup.find("h1", class_="styles__EventTitle-sc-768cdea1-7 eNioSo")
+    def get_event_title(cls, response: Response):
+        title_tag = (
+            response.find("h1", lambda elem: elem.has_class("styles__EventTitle-sc-768cdea1-7"))
         )
-        title = h1_tag.get_text(strip=True).replace(",", "") if h1_tag else None
+        title = title_tag.get_all_text(strip=True, separator=" ").replace(",", "") if title_tag else None
 
         return title
 
     @classmethod
-    def parse_page(cls, html: str) -> dict:
+    def parse_page(cls, page_response: Response) -> dict[str, dict]:
         result = {}
-        soup = BeautifulSoup(html, "html.parser")
-        containers = soup.find_all("div", class_="N54PNb BToiNc")
+        containers = page_response.find_all("div", class_="N54PNb BToiNc")
 
         for container in containers:
             link_tag = container.find("a", class_="zReHs")
             link = link_tag["href"] if link_tag else None
 
-            h3_tag = link_tag.find("h3")
-            title = h3_tag.get_text(strip=True).replace(",", "") if h3_tag else None
+            link_title_tag = link_tag.find("h3") if link_tag else None
+            link_title = link_title_tag.get_all_text(strip=True, separator=" ").replace(",", "") if link_title_tag else None
 
-            span_tag = container.find("span", class_="YrbPuc")
-            date = (
-                span_tag.find("span").get_text(strip=True).replace(",", "")
-                if span_tag
-                else None
-            )
+            link_info_span_tag = container.find("span", class_="YrbPuc")
 
-            desc_tag = span_tag.find_next_sibling("span") if span_tag else None
-            desc = desc_tag.get_text(strip=True).replace(",", "") if desc_tag else None
+            date_tag = link_info_span_tag.children.first if link_info_span_tag else None
+            date = date_tag.get_all_text(strip=True).replace(",", "") if date_tag else None
 
-            result[link] = {"title": title, "date": date, "desc": desc}
+            desc_tag = link_info_span_tag.siblings.search(lambda sib: sib.tag == "span") if link_info_span_tag else None
+            desc = desc_tag.get_all_text(strip=True, separator=" ").replace(",", "") if desc_tag else None
+
+            keyword_tags = desc_tag.find_all("em") if desc_tag else None
+            keywords = "|".join([keyword_tag.text for keyword_tag in keyword_tags]) if keyword_tags else None
+
+            result[link] = {"link_title": link_title, "date": date, "keywords": keywords, "desc": desc}
 
         return result
 
@@ -352,39 +303,40 @@ class GoogleFilterWebscraper(Webscraper):
         scraper = Webscraper(num_concurrent_wins, log_callback=log)
 
         # fetch all pages using start parameter pagination
-        event_urls_to_info = {}
-        start = 0
+        event_url_to_info = {}
         log(f"Fetching results starting from page 0...")
 
+        start = 0
+        cookies = []
         while True:
             page_url = f"{url}&start={start}"
-            page_url_to_html = asyncio.run(scraper.get_htmls([page_url]))
-            page_html = page_url_to_html[page_url]
+            page_url_to_response, cookies = asyncio.run(scraper.get_responses([page_url], cookies))
 
-            page_urls_to_info = cls.parse_page(page_html)
+            page_event_url_to_info = cls.parse_page(page_url_to_response[page_url])
 
-            if not page_urls_to_info:
+            if not page_event_url_to_info:
                 log(f"No more results at start={start}. Stopping.")
                 break
 
-            event_urls_to_info.update(page_urls_to_info)
-            log(f"Fetched page (start={start}) with {len(page_urls_to_info)} results")
+            event_url_to_info.update(page_event_url_to_info)
+            log(f"Fetched page (start={start}) with {len(page_event_url_to_info)} results")
             start += 10
 
-        event_urls_to_htmls = asyncio.run(scraper.get_htmls(event_urls_to_info.keys()))
-        for url, html in event_urls_to_htmls.items():
-            event_urls_to_info[url]["event_title"] = cls.get_axs_event_title(html, log_callback)
+        # add event title to info
+        event_url_to_response, _ = asyncio.run(scraper.get_responses(list(event_url_to_info.keys())))
+        for url, response in event_url_to_response.items():
+            event_url_to_info[url]["event_title"] = cls.get_event_title(response)
 
         dirname = os.path.dirname(outfile)
         if dirname != "" and not os.path.exists(dirname):
             os.makedirs(dirname)
 
         with open(outfile, mode="w", encoding="utf-8") as file:
-            file.write(f"Event Title,Title,URL,Date,Description\n")
-            for url, info in event_urls_to_info.items():
-                file.write(
-                    f"{info['event_title']},{info['title']},{url},{info['date']},{info['desc']}\n"
-                )
+            file.write(f"Event Title,Link Title,URL,Date,Keywords,Description\n")
+            csv_writer = csv.writer(file)
+            for url, info in event_url_to_info.items():
+                print([info['event_title'], info['link_title'], url, info['date'], info['desc']])
+                csv_writer.writerow([info['event_title'], info['link_title'], url, info['date'], info['keywords'], info['desc']])
 
 
 # ===============================================================================
@@ -718,48 +670,16 @@ class MainWindow(QMainWindow):
 
 
 async def test_stealth():
-    """Launch browser and navigate to bot.sannysoft.com for inspection."""
-    stealth_script = """
-        (function() {
-            function createPluginArray() {
-                var plugins = [
-                    { name: 'Chrome PDF Plugin', description: 'Portable Document Format', filename: 'internal-pdf-viewer', length: 0 },
-                    { name: 'Chrome PDF Viewer', description: '', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', length: 1 },
-                    { name: 'Native Client', description: '', filename: 'internal-nacl-plugin', length: 2 }
-                ];
-                plugins.length = 3;
-                plugins.item = function(i) { return this[i] || null; };
-                plugins.namedItem = function(name) { return null; };
-                plugins.refresh = function() {};
-                return plugins;
-            }
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => createPluginArray() });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-        })();
-    """
-    playwright = await async_playwright().start()
-    browser = await playwright.chromium.launch(headless=False)
-    context = await browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
-        ),
-        locale="en-US",
-        timezone_id="America/New_York",
-        viewport={"width": 1920, "height": 1080},
-    )
-    context.add_init_script(stealth_script)
-    page = await context.new_page()
-    await page.add_init_script(stealth_script)
-
     print("Navigating to bot.sannysoft.com...")
-    await page.goto("https://bot.sannysoft.com/")
-    print("Page loaded. Opening Playwright inspector for inspection...")
-    await page.pause()
-
-    await browser.close()
-    await playwright.stop()
+    async with AsyncStealthySession(
+        headless=False,
+        real_chrome=False,
+        block_webrtc=True,
+        solve_cloudflare=True,
+        timeout=60000,  # 60 seconds for Cloudflare challenges
+        max_pages=1
+    ) as session:
+        await session.fetch("https://bot.sannysoft.com/", wait=1000000)
 
 
 def parse_args():
