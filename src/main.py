@@ -6,6 +6,7 @@ import datetime
 import random
 import re
 import argparse
+import subprocess
 
 from PySide6.QtCore import Qt, QDate, Signal, QObject, QThread
 from PySide6.QtWidgets import (
@@ -26,6 +27,8 @@ from PySide6.QtWidgets import (
     QFileIconProvider,
     QDateEdit,
     QSizePolicy,
+    QDialog,
+    QProgressBar,
 )
 
 import asyncio
@@ -56,11 +59,14 @@ def get_application_path():
         return os.path.dirname(os.path.dirname(__file__))
 
 
-if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(
-        get_application_path(), "browser_drivers"
-    )
-print(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
+def are_browsers_installed() -> bool:
+    browser_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    if not browser_path or not os.path.exists(browser_path):
+        return False
+    try:
+        return any("chromium" in d.lower() for d in os.listdir(browser_path))
+    except OSError:
+        return False
 
 
 # ===============================================================================
@@ -74,7 +80,9 @@ class Webscraper:
         self.failed_conn_urls = []
         self.log = log_callback or print
 
-    async def _get_response(self, url: str, session: AsyncStealthySession) -> Response|None:
+    async def _get_response(
+        self, url: str, session: AsyncStealthySession
+    ) -> Response | None:
         try:
             self.log(f"sending request to {url}")
             response = await session.fetch(url)
@@ -84,8 +92,14 @@ class Webscraper:
                 self.failed_conn_urls.remove(url)
 
             if self._is_captcha_page(response):
-                self.log("Response contains captcha. Requiring manual captcha solution.")
-                notification.notify(title="Webscraper", message="Manual CAPTCHA solution required", app_name="Webscraper")
+                self.log(
+                    "Response contains captcha. Requiring manual captcha solution."
+                )
+                notification.notify(
+                    title="Webscraper",
+                    message="Manual CAPTCHA solution required",
+                    app_name="Webscraper",
+                )
                 response, captcha_cookies = await self.manually_solve_captcha(url)
                 await session.context.add_cookies(captcha_cookies)
 
@@ -97,7 +111,9 @@ class Webscraper:
             self.failed_conn_urls.append(url)
             return None
 
-    async def get_responses(self, urls: list[str], cookies: list[dict] = []) -> tuple[dict[str, Response], list[dict]]:
+    async def get_responses(
+        self, urls: list[str], cookies: list[dict] = []
+    ) -> tuple[dict[str, Response], list[dict]]:
         # get html of each url
         #   - note that the result is in the same order as the passed-in list of coros
         async with AsyncStealthySession(
@@ -106,7 +122,7 @@ class Webscraper:
             block_webrtc=True,
             solve_cloudflare=True,
             timeout=60000,  # 60 seconds for Cloudflare challenges
-            max_pages=self.num_concurrent_wins
+            max_pages=self.num_concurrent_wins,
         ) as session:
             if cookies:
                 await session.context.add_cookies(cookies)
@@ -120,15 +136,16 @@ class Webscraper:
                 if len(self.failed_conn_urls) == 0:
                     break
                 if len(url_index_map) == 0:
-                    url_index_map = { urls[i]: i for i in range(len(urls)) }
+                    url_index_map = {urls[i]: i for i in range(len(urls))}
                 self.log(f"\nRetrying failed connections:")
                 failed_conn_urls = self.failed_conn_urls
-                coros = [self._get_response(url, session) for url in self.failed_conn_urls]
+                coros = [
+                    self._get_response(url, session) for url in self.failed_conn_urls
+                ]
                 retry_responses = await asyncio.gather(*coros)
                 for retry_idx, failed_conn_url in enumerate(failed_conn_urls):
                     idx = url_index_map[failed_conn_url]
                     responses[idx] = retry_responses[retry_idx]
-
 
             session_cookies = await session.context.cookies()
 
@@ -148,8 +165,11 @@ class Webscraper:
     def get_wait_for_url_action(cls, url):
         async def wait_for_url_action(page):
             # await page.wait_for_function(f"() => console.log(decodeURI(window.location.href))", timeout=0)
-            await page.wait_for_function(f"() => decodeURI(window.location.href).includes('{url}')", timeout=0)
+            await page.wait_for_function(
+                f"() => decodeURI(window.location.href).includes('{url}')", timeout=0
+            )
             await page.wait_for_load_state()
+
         return wait_for_url_action
 
     # TODO: take in kwargs like page_action to pass into fetch call
@@ -162,14 +182,13 @@ class Webscraper:
             solve_cloudflare=True,
             timeout=60000,  # 60 seconds for Cloudflare challenges
         ) as session:
-            response = await session.fetch(url, page_action=cls.get_wait_for_url_action(url))
-            with open("output.html", "w") as file:
-                file.write(response.html_content)
+            response = await session.fetch(
+                url, page_action=cls.get_wait_for_url_action(url)
+            )
             # await session.fetch(url, wait_selector="h3")
             cookies = await session.context.cookies()
 
         return response, cookies
-
 
 
 class AxsSeriesWebscraper(Webscraper):
@@ -180,8 +199,8 @@ class AxsSeriesWebscraper(Webscraper):
 
         log("Parsing for series titles...")
         for url, response in url_to_response.items():
-            title_tag = (
-                response.find("h1", lambda elem: elem.has_class("styles__SeriesTitle-sc-65abd048-1"))
+            title_tag = response.find(
+                "h1", lambda elem: elem.has_class("styles__SeriesTitle-sc-65abd048-1")
             )
             title = title_tag.get_all_text(strip=True) if title_tag else None
             url_to_title[url] = title
@@ -237,10 +256,14 @@ class AxsSeriesWebscraper(Webscraper):
 class GoogleFilterWebscraper(Webscraper):
     @classmethod
     def get_event_title(cls, response: Response):
-        title_tag = (
-            response.find("h1", lambda elem: elem.has_class("styles__EventTitle-sc-768cdea1-7"))
+        title_tag = response.find(
+            "h1", lambda elem: elem.has_class("styles__EventTitle-sc-768cdea1-7")
         )
-        title = title_tag.get_all_text(strip=True, separator=" ").replace(",", "") if title_tag else None
+        title = (
+            title_tag.get_all_text(strip=True, separator=" ").replace(",", "")
+            if title_tag
+            else None
+        )
 
         return title
 
@@ -254,20 +277,43 @@ class GoogleFilterWebscraper(Webscraper):
             link = link_tag["href"] if link_tag else None
 
             link_title_tag = link_tag.find("h3") if link_tag else None
-            link_title = link_title_tag.get_all_text(strip=True, separator=" ").replace(",", "") if link_title_tag else None
+            link_title = (
+                link_title_tag.get_all_text(strip=True, separator=" ").replace(",", "")
+                if link_title_tag
+                else None
+            )
 
             link_info_span_tag = container.find("span", class_="YrbPuc")
 
             date_tag = link_info_span_tag.children.first if link_info_span_tag else None
-            date = date_tag.get_all_text(strip=True).replace(",", "") if date_tag else None
+            date = (
+                date_tag.get_all_text(strip=True).replace(",", "") if date_tag else None
+            )
 
-            desc_tag = link_info_span_tag.siblings.search(lambda sib: sib.tag == "span") if link_info_span_tag else None
-            desc = desc_tag.get_all_text(strip=True, separator=" ").replace(",", "") if desc_tag else None
+            desc_tag = (
+                link_info_span_tag.siblings.search(lambda sib: sib.tag == "span")
+                if link_info_span_tag
+                else None
+            )
+            desc = (
+                desc_tag.get_all_text(strip=True, separator=" ").replace(",", "")
+                if desc_tag
+                else None
+            )
 
             keyword_tags = desc_tag.find_all("em") if desc_tag else None
-            keywords = "|".join([keyword_tag.text for keyword_tag in keyword_tags]) if keyword_tags else None
+            keywords = (
+                "|".join([keyword_tag.text for keyword_tag in keyword_tags])
+                if keyword_tags
+                else None
+            )
 
-            result[link] = {"link_title": link_title, "date": date, "keywords": keywords, "desc": desc}
+            result[link] = {
+                "link_title": link_title,
+                "date": date,
+                "keywords": keywords,
+                "desc": desc,
+            }
 
         return result
 
@@ -309,7 +355,9 @@ class GoogleFilterWebscraper(Webscraper):
         cookies = []
         while True:
             page_url = f"{url}&start={start}"
-            page_url_to_response, cookies = asyncio.run(scraper.get_responses([page_url], cookies))
+            page_url_to_response, cookies = asyncio.run(
+                scraper.get_responses([page_url], cookies)
+            )
 
             page_event_url_to_info = cls.parse_page(page_url_to_response[page_url])
 
@@ -318,11 +366,15 @@ class GoogleFilterWebscraper(Webscraper):
                 break
 
             event_url_to_info.update(page_event_url_to_info)
-            log(f"Fetched page {start//10 + 1} with {len(page_event_url_to_info)} results")
+            log(
+                f"Fetched page {start // 10 + 1} with {len(page_event_url_to_info)} results"
+            )
             start += 10
 
         # add event title to info
-        event_url_to_response, _ = asyncio.run(scraper.get_responses(list(event_url_to_info.keys())))
+        event_url_to_response, _ = asyncio.run(
+            scraper.get_responses(list(event_url_to_info.keys()))
+        )
         for url, response in event_url_to_response.items():
             event_url_to_info[url]["event_title"] = cls.get_event_title(response)
 
@@ -334,7 +386,16 @@ class GoogleFilterWebscraper(Webscraper):
             file.write(f"Event Title,Link Title,URL,Date,Keywords,Description\n")
             csv_writer = csv.writer(file)
             for url, info in event_url_to_info.items():
-                csv_writer.writerow([info['event_title'], info['link_title'], url, info['date'], info['keywords'], info['desc']])
+                csv_writer.writerow(
+                    [
+                        info["event_title"],
+                        info["link_title"],
+                        url,
+                        info["date"],
+                        info["keywords"],
+                        info["desc"],
+                    ]
+                )
 
 
 # ===============================================================================
@@ -666,6 +727,59 @@ class MainWindow(QMainWindow):
 
         self.sidebar.setCurrentRow(0)  # default page
 
+class BrowserInstallWorker(QThread):
+    finished = Signal(bool)
+
+    def run(self):
+        try:
+            # HACK: taken from https://github.com/microsoft/playwright-python/blob/release-1.58/playwright/__main__.py
+            #  - this is what the CLI invokes (see project.scripts section of https://github.com/microsoft/playwright-python/blob/release-1.58/pyproject.toml)
+            from playwright._impl._driver import compute_driver_executable, get_driver_env
+            driver_executable, driver_cli = compute_driver_executable()
+            subprocess.run(
+                [driver_executable, driver_cli, "install", "chromium"], env=get_driver_env()
+            )
+            self.finished.emit(True)
+        except Exception as e:
+            print(e)
+            self.finished.emit(False)
+
+
+class BrowserInstallDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Installing Browser Drivers")
+        self.setMinimumWidth(400)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+
+        label = QLabel("Installing browser drivers...")
+        label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        layout.addWidget(self.progress_bar)
+
+        self.status_label = QLabel()
+        layout.addWidget(self.status_label)
+
+        self.thread = BrowserInstallWorker(self)
+        self.thread.finished.connect(self._on_install_finished)
+        self.thread.start()
+
+    def _on_install_finished(self, success: bool):
+        if success:
+            self.status_label.setText("Installation complete!")
+        else:
+            self.status_label.setText("Installation failed. Please try again.")
+        self.accept()
+
+
+# ===============================================================================
+# MAIN
+# ===============================================================================
 
 async def test_stealth():
     print("Navigating to bot.sannysoft.com...")
@@ -675,7 +789,7 @@ async def test_stealth():
         block_webrtc=True,
         solve_cloudflare=True,
         timeout=60000,  # 60 seconds for Cloudflare challenges
-        max_pages=1
+        max_pages=1,
     ) as session:
         await session.fetch("https://bot.sannysoft.com/", wait=1000000)
 
@@ -691,6 +805,12 @@ def parse_args():
 
 
 def main():
+    if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(
+            get_application_path(), "browser_drivers"
+        )
+    print(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
+
     args = parse_args()
 
     if args.test_stealth:
@@ -698,6 +818,11 @@ def main():
     else:
         app = QApplication([])
         app.setStyle("Fusion")
+
+        if not are_browsers_installed():
+            dialog = BrowserInstallDialog()
+            dialog.exec()
+
         window = MainWindow()
         window.show()
         app.exec()
