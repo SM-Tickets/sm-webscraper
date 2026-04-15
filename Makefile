@@ -1,10 +1,10 @@
 all: clean build
 
 clean:
-	rm -rf dist build axs-webscraper.spec
+	rm -rf dist build sm-webscraper.spec
 
 build:
-	PLAYWRIGHT_BROWSERS_PATH=./browser_drivers playwright install chromium
+	# PLAYWRIGHT_BROWSERS_PATH=./browser_drivers patchright install chromium
 	uv run pyinstaller --noconsole \
 		--icon ./assets/axs_logo.png \
 		--onefile \
@@ -12,7 +12,7 @@ build:
 		--collect-all apify_fingerprint_datapoints \
 		--collect-all patchright \
 		--collect-all plyer \
-		--name axs-webscraper \
+		--name sm-webscraper \
 		src/main.py
 
 install:
