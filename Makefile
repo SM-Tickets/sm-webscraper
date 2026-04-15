@@ -6,11 +6,11 @@ clean:
 build:
 	# PLAYWRIGHT_BROWSERS_PATH=./browser_drivers patchright install chromium
 	uv run pyinstaller --noconsole \
-		--icon ./assets/axs_logo.png \
 		--onefile \
 		--add-data "./assets:./assets" \
 		--collect-all apify_fingerprint_datapoints \
 		--collect-all patchright \
+		--collect-all playwright \
 		--collect-all plyer \
 		--name sm-webscraper \
 		src/main.py
