@@ -7,4 +7,5 @@ dependencies = [
     "pyinstaller>=6.19.0",
     "pyside6>=6.11.0",
     "scrapling[fetchers]>=0.4.5",
+    "toml>=0.10.2",
 ]

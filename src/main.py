@@ -7,6 +7,7 @@ import random
 import re
 import argparse
 import subprocess
+import toml
 
 from PySide6.QtCore import Qt, QDate, Signal, QObject, QThread
 from PySide6.QtWidgets import (
@@ -67,6 +68,66 @@ def are_browsers_installed() -> bool:
         return any("chromium" in d.lower() for d in os.listdir(browser_path))
     except OSError:
         return False
+
+
+def get_config_path():
+    return os.path.join(get_application_path(), "config.toml")
+
+
+def load_config():
+    # TODO: remove default values here since they get added when a scraper runs anyways?
+    default_config = {
+        "axs_series": {
+            "start_id": "",
+            "stop_id": "",
+        },
+        "google_filter": {
+            "keywords": "4 Pack,Promo,Crew Pack,Flash,Anniversary,BOGO,2 Pack,2 for 1,Discount",
+            "after_date": "-3d",
+        },
+    }
+
+    config_path = get_config_path()
+    if not os.path.exists(config_path):
+        return default_config
+
+    try:
+        return toml.load(config_path)
+    except Exception:
+        return default_config
+
+
+def save_config(config):
+    config_path = get_config_path()
+    with open(config_path, "w") as f:
+        toml.dump(config, f)
+
+
+def parse_date(after_date: str) -> QDate:
+    parsed_date = QDate.fromString(after_date, "yyyy-MM-dd")
+    if parsed_date.isValid():
+        return parsed_date
+
+    current_date = QDate.currentDate()
+
+    match = re.match(r"^(-?)(\d+)([md])$", after_date)
+    if match:
+        sign = match.group(1)
+        value = int(match.group(2))
+        unit = match.group(3)
+
+        if sign == "-":
+            if unit == "m":
+                return current_date.addMonths(-value)
+            elif unit == "d":
+                return current_date.addDays(-value)
+        else:
+            if unit == "m":
+                return current_date.addMonths(value)
+            elif unit == "d":
+                return current_date.addDays(value)
+
+    return current_date
 
 
 # ===============================================================================
@@ -521,6 +582,8 @@ class AxsSeriesWebscraperWidget(QWidget):
         self.worker_thread = None
         self.worker = None
 
+        config = load_config()
+
         # Widgets
         self.start_id_line_edit = QLineEdit(self)
         self.stop_id_line_edit = QLineEdit(self)
@@ -534,6 +597,11 @@ class AxsSeriesWebscraperWidget(QWidget):
         self.concurrent_windows_spin_box.setMaximum(NUM_CORES)
         self.concurrent_windows_spin_box.setValue(NUM_CORES)
         self.run_push_button.clicked.connect(self.run)
+
+        if config["axs_series"]["start_id"]:
+            self.start_id_line_edit.setText(str(config["axs_series"]["start_id"]))
+        if config["axs_series"]["stop_id"]:
+            self.stop_id_line_edit.setText(str(config["axs_series"]["stop_id"]))
 
         # Layouts
         form_layout = QFormLayout()
@@ -588,6 +656,11 @@ class AxsSeriesWebscraperWidget(QWidget):
             self.logger_widget.log("Need to provide a stop_id")
             return
 
+        config = load_config()
+        config["axs_series"]["start_id"] = str(self.start_id)
+        config["axs_series"]["stop_id"] = str(self.stop_id)
+        save_config(config)
+
         if not self.is_running:
             self.is_running = True
             self.start_time = time.time()
@@ -619,6 +692,8 @@ class GoogleFilterWebscraperWidget(QWidget):
         self.worker_thread = None
         self.worker = None
 
+        config = load_config()
+
         self.keywords_line_edit = QLineEdit(self)
         self.oldest_date_edit = DateSelectorWidget()
         self.concurrent_windows_spin_box = QSpinBox(self)
@@ -626,13 +701,24 @@ class GoogleFilterWebscraperWidget(QWidget):
         self.run_push_button = QPushButton("Run", self)
         self.logger_widget = LoggerWidget()
 
-        self.keywords_line_edit.setText(
-            "4 Pack,Promo,Crew Pack,Flash,Anniversary,BOGO,2 Pack,2 for 1,Discount"
-        )
         self.concurrent_windows_spin_box.setMinimum(1)
         self.concurrent_windows_spin_box.setMaximum(NUM_CORES)
         self.concurrent_windows_spin_box.setValue(NUM_CORES)
-        self.oldest_date_edit.date_edit.setDate(QDate.currentDate().addMonths(-1))
+
+        if config["google_filter"]["keywords"]:
+            self.keywords_line_edit.setText(config["google_filter"]["keywords"])
+        else:
+            self.keywords_line_edit.setText(
+                "4 Pack,Promo,Crew Pack,Flash,Anniversary,BOGO,2 Pack,2 for 1,Discount"
+            )
+
+        if config["google_filter"]["after_date"]:
+            self.oldest_date_edit.date_edit.setDate(
+                parse_date(config["google_filter"]["after_date"])
+            )
+        else:
+            self.oldest_date_edit.date_edit.setDate(QDate.currentDate().addMonths(-1))
+
         self.run_push_button.clicked.connect(self.run)
 
         form_layout = QFormLayout()
@@ -675,6 +761,10 @@ class GoogleFilterWebscraperWidget(QWidget):
             self.worker = None
 
     def run(self):
+        config = load_config()
+        config["google_filter"]["keywords"] = self.keywords_line_edit.text()
+        save_config(config)
+
         if not self.is_running:
             self.is_running = True
             self.start_time = time.time()
@@ -727,6 +817,7 @@ class MainWindow(QMainWindow):
 
         self.sidebar.setCurrentRow(0)  # default page
 
+
 class BrowserInstallWorker(QThread):
     finished = Signal(bool)
 
@@ -734,10 +825,15 @@ class BrowserInstallWorker(QThread):
         try:
             # HACK: taken from https://github.com/microsoft/playwright-python/blob/release-1.58/playwright/__main__.py
             #  - this is what the CLI invokes (see project.scripts section of https://github.com/microsoft/playwright-python/blob/release-1.58/pyproject.toml)
-            from playwright._impl._driver import compute_driver_executable, get_driver_env
+            from playwright._impl._driver import (
+                compute_driver_executable,
+                get_driver_env,
+            )
+
             driver_executable, driver_cli = compute_driver_executable()
             subprocess.run(
-                [driver_executable, driver_cli, "install", "chromium"], env=get_driver_env()
+                [driver_executable, driver_cli, "install", "chromium"],
+                env=get_driver_env(),
             )
             self.finished.emit(True)
         except Exception as e:
@@ -780,6 +876,7 @@ class BrowserInstallDialog(QDialog):
 # ===============================================================================
 # MAIN
 # ===============================================================================
+
 
 async def test_stealth():
     print("Navigating to bot.sannysoft.com...")
