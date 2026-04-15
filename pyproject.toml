@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
     "plyer>=2.1.0",
     "pyinstaller>=6.19.0",
+    "pyobjus>=1.2.4", # required for plyer on macos
     "pyside6>=6.11.0",
     "scrapling[fetchers]>=0.4.5",
     "toml>=0.10.2",
