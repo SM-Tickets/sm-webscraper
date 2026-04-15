@@ -304,7 +304,6 @@ class GoogleFilterWebscraper(Webscraper):
 
         # fetch all pages using start parameter pagination
         event_url_to_info = {}
-        log(f"Fetching results starting from page 0...")
 
         start = 0
         cookies = []
@@ -319,7 +318,7 @@ class GoogleFilterWebscraper(Webscraper):
                 break
 
             event_url_to_info.update(page_event_url_to_info)
-            log(f"Fetched page (start={start}) with {len(page_event_url_to_info)} results")
+            log(f"Fetched page {start//10 + 1} with {len(page_event_url_to_info)} results")
             start += 10
 
         # add event title to info
@@ -335,7 +334,6 @@ class GoogleFilterWebscraper(Webscraper):
             file.write(f"Event Title,Link Title,URL,Date,Keywords,Description\n")
             csv_writer = csv.writer(file)
             for url, info in event_url_to_info.items():
-                print([info['event_title'], info['link_title'], url, info['date'], info['desc']])
                 csv_writer.writerow([info['event_title'], info['link_title'], url, info['date'], info['keywords'], info['desc']])
 
 
