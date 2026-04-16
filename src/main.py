@@ -49,8 +49,13 @@ def get_application_path():
     if getattr(sys, "frozen", False):  # if running as bundled executable
         # if ran using macos application
         path_components = sys.executable.split(os.sep)
-        if "axs-webscraper.app" in path_components:
-            dir_index = path_components.index("axs-webscraper.app")
+        for i in range(len(path_components)-1, -1, -1):
+            match =  re.search(r".*\.app$", path_components[i])
+            if match:
+                dir_index = path_components.index(match.group())
+                return os.sep.join(path_components[:dir_index])
+        if "sm-webscraper.app" in path_components:
+            dir_index = path_components.index("sm-webscraper.app")
             return os.sep.join(path_components[:dir_index])
         # if run using raw executable
         else:
@@ -200,6 +205,8 @@ class Webscraper:
                     url_index_map = {urls[i]: i for i in range(len(urls))}
                 self.log(f"\nRetrying failed connections:")
                 failed_conn_urls = self.failed_conn_urls
+                print(failed_conn_urls)
+                print(url_index_map)
                 coros = [
                     self._get_response(url, session) for url in self.failed_conn_urls
                 ]
