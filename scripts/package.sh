@@ -13,27 +13,19 @@ if [ ! -d ./dist ]; then
 fi
 
 if [ "$(uname -o)" = "Msys" ]; then
-    cp dist/axs-webscraper.exe .
-    zip -r dist/axs-webscraper_win_x86-64.zip axs-webscraper.exe browser_drivers/;
-    rm axs-webscraper.exe
-    cp dist/axs-webscraper.exe dist/axs-webscraper-core_win_x86-64.exe
+    cp dist/sm-webscraper.exe .
+    zip -r dist/sm-webscraper_win_x86-64.zip sm-webscraper.exe
+    rm sm-webscraper.exe
 elif [ "$(uname -o)" = "Darwin" ]; then
     if [ "$(uname -m)" = "x86_64" ]; then
-        cp -a dist/axs-webscraper dist/axs-webscraper.app .
-        tar czvf dist/axs-webscraper_macos_x86-64.tar.gz axs-webscraper axs-webscraper.app browser_drivers/;
-        rm -rf axs-webscraper axs-webscraper.app
-        cp dist/axs-webscraper dist/axs-webscraper-core_macos_x86-64
-        cp -a dist/axs-webscraper.app dist/axs-webscraper-core_macos_x86-64.app
+        true
     elif [ "$(uname -m)" = "arm64" ]; then
-        cp -a dist/axs-webscraper dist/axs-webscraper.app scripts/macos/sanitize .
-        tar czvf dist/axs-webscraper_macos_arm64.tar.gz axs-webscraper axs-webscraper.app browser_drivers/;
-        rm -rf axs-webscraper axs-webscraper.app sanitize
-        cp dist/axs-webscraper dist/axs-webscraper-core_macos_arm64
-        cp -a dist/axs-webscraper.app dist/axs-webscraper-core_macos_arm64.app
+        cp -a dist/sm-webscraper.app scripts/macos/sanitize .
+        tar czvf dist/sm-webscraper_macos_arm64.tar.gz sm-webscraper.app sanitize
+        rm -rf sm-webscraper.app sanitize
     fi
 elif [ "$(uname -s)" = "Linux" ]; then
-    cp dist/axs-webscraper .
-    tar czvf dist/axs-webscraper_linux_x86-64.tar.gz axs-webscraper browser_drivers/
-    rm axs-webscraper
-    cp dist/axs-webscraper dist/axs-webscraper-core_linux_x86-64
+    cp dist/sm-webscraper .
+    tar czvf dist/sm-webscraper_linux_x86-64.tar.gz sm-webscraper
+    rm sm-webscraper
 fi

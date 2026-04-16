@@ -4,4 +4,7 @@
 # xattr -d com.apple.quarantine "$(dirname "$0")/axs-webscraper.app"
 # find ~ -name 'axs-webscraper.app' -exec xattr -d com.apple.quarantine {} \; 2>/dev/null
 
-sudo xattr -r -d com.apple.quarantine "$(dirname "$0")"
+__dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "$__dir"
+sudo xattr -r -d com.apple.quarantine "$__dir"
