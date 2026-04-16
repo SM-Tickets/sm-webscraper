@@ -207,6 +207,7 @@ class Webscraper:
                 for retry_idx, failed_conn_url in enumerate(failed_conn_urls):
                     idx = url_index_map[failed_conn_url]
                     responses[idx] = retry_responses[retry_idx]
+                    print(retry_responses)
 
             session_cookies = await session.context.cookies()
 
@@ -221,18 +222,6 @@ class Webscraper:
     def _is_captcha_page(cls, response):
         return response.find("iframe", title="reCAPTCHA")
 
-    # NOTE: This won't work if the site redirects to a different URL. A better method would be to somehow wait until _is_captcha_page returns False, but that is done within Python, not Javascript.
-    @classmethod
-    def get_wait_for_url_action(cls, url):
-        async def wait_for_url_action(page):
-            # await page.wait_for_function(f"() => console.log(decodeURI(window.location.href))", timeout=0)
-            await page.wait_for_function(
-                f"() => decodeURI(window.location.href).includes('{url}')", timeout=0
-            )
-            await page.wait_for_load_state()
-
-        return wait_for_url_action
-
     # TODO: take in kwargs like page_action to pass into fetch call
     @classmethod
     async def manually_solve_captcha(cls, url):
@@ -243,8 +232,16 @@ class Webscraper:
             solve_cloudflare=True,
             timeout=60000,  # 60 seconds for Cloudflare challenges
         ) as session:
+            # NOTE: This won't work if the site redirects to a different URL. A better method would be to somehow wait until _is_captcha_page returns False, but that is done within Python, not Javascript.
+            async def wait_for_url_action(page):
+                # await page.wait_for_function(f"() => console.log(decodeURI(window.location.href))", timeout=0)
+                await page.wait_for_function(
+                    f"() => decodeURI(window.location.href).includes('{url}')", timeout=0
+                )
+                await page.wait_for_load_state()
+
             response = await session.fetch(
-                url, page_action=cls.get_wait_for_url_action(url)
+                url, page_action=wait_for_url_action
             )
             # await session.fetch(url, wait_selector="h3")
             cookies = await session.context.cookies()
