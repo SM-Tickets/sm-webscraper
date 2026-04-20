@@ -265,7 +265,7 @@ class AxsSeriesWebscraper(Webscraper):
         log("Parsing for series titles...")
         for url, response in url_to_response.items():
             title_tag = response.find(
-                "h1", lambda elem: elem.has_class("styles__SeriesTitle-sc-65abd048-1")
+                "h1", lambda elem: elem.has_class("styles__SeriesTitle-sc-d3a1a166-1")
             )
             title = title_tag.get_all_text(strip=True) if title_tag else None
             url_to_title[url] = title
